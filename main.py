@@ -8,14 +8,17 @@ import queue
 import threading
 import uuid
 import re
+import os
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 from scanner import run_scan
 
+load_dotenv()
 app = FastAPI(title="Subdomain Scanner")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -48,7 +51,8 @@ async def start_scan(req: ScanRequest):
     q: queue.Queue = queue.Queue()
     _scans[scan_id] = q
 
-    thread = threading.Thread(target=run_scan, args=(domain, q), daemon=True)
+    shodan_key = os.getenv("SHODAN_API_KEY")
+    thread = threading.Thread(target=run_scan, args=(domain, q, 100, 50, shodan_key), daemon=True)
     thread.start()
 
     return {"scan_id": scan_id}

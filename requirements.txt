@@ -9,3 +9,4 @@ ipwhois
 rich
 python-whois
 shodan
+python-dotenv

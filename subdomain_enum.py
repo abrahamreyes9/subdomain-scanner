@@ -807,13 +807,7 @@ def _enrich_batch(batch: list[tuple[str, str]], threads: int) -> dict[str, dict]
     
     # SSRF Protection: Filter out private/loopback IPs before probing
     safe_batch = []
-    for host, ip in batch:
-        try:
-            ip_obj = ipaddress.ip_address(ip)
-            if ip_obj.is_global:
-                safe_batch.append((host, ip))
-        except ValueError:
-            continue
+    safe_batch = [(h, ip) for h, ip in batch if _is_public_ip(ip)]
 
     with ThreadPoolExecutor(max_workers=threads) as ex:
         f_info     = {host: ex.submit(get_ip_info,      ip)   for host, ip in safe_batch}
@@ -908,8 +902,12 @@ def collect_dns_records(domain: str) -> dict:
         hosts  = [(r.preference, str(r.exchange).rstrip(".")) for r in mx_raw]
         with ThreadPoolExecutor(max_workers=10) as ex:
             ips   = {h: ex.submit(resolve_ip, h)   for _, h in hosts}
+        
+        # SSRF Protection: only enrich public IPs
+        public_mx = {h: ip for _, h in hosts if (ip := ips[h].result()) and _is_public_ip(ip)}
         with ThreadPoolExecutor(max_workers=10) as ex:
-            infos = {h: ex.submit(get_ip_info, ips[h].result()) for _, h in hosts if ips[h].result()}
+            infos = {h: ex.submit(get_ip_info, ip) for h, ip in public_mx.items()}
+            
         for pref, host in hosts:
             ip   = ips[host].result()
             info = infos[host].result() if host in infos else {}
@@ -927,9 +925,13 @@ def collect_dns_records(domain: str) -> dict:
         hosts  = [str(r.target).rstrip(".") for r in ns_raw]
         with ThreadPoolExecutor(max_workers=10) as ex:
             ips  = {h: ex.submit(resolve_ip, h) for h in hosts}
-            sshs = {h: ex.submit(check_ssh, ips[h].result()) for h in hosts if ips[h].result()}
+        
+        # SSRF Protection: only probe/enrich public IPs
+        public_ns = {h: ip for h in hosts if (ip := ips[h].result()) and _is_public_ip(ip)}
         with ThreadPoolExecutor(max_workers=10) as ex:
-            infos = {h: ex.submit(get_ip_info, ips[h].result()) for h in hosts if ips[h].result()}
+            sshs  = {h: ex.submit(check_ssh, ip)   for h, ip in public_ns.items()}
+            infos = {h: ex.submit(get_ip_info, ip) for h, ip in public_ns.items()}
+            
         for host in hosts:
             ip   = ips[host].result()
             info = infos[host].result() if host in infos else {}
@@ -1034,6 +1036,12 @@ def _h(text: str) -> str:
             .replace("&","&amp;").replace("<","&lt;").replace("'","&#39;")
             .replace(">","&gt;").replace('"',"&quot;"))
 
+def _is_public_ip(ip: str) -> bool:
+    """Check if an IP address is a valid public (globally routable) address."""
+    try:
+        return ipaddress.ip_address(ip).is_global
+    except ValueError:
+        return False
 
 def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dict],
                   dns_data: dict, path: str) -> None:

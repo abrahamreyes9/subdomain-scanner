@@ -4,6 +4,11 @@ emitting structured events into a queue for the SSE stream.
 """
 
 import queue
+try:
+    import shodan as shodan_lib
+except ImportError:
+    shodan_lib = None
+
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
 from subdomain_enum import (
@@ -31,7 +36,8 @@ def _safe_result(future: Future, source: str, emit) -> set:
 
 
 def run_scan(domain: str, q: queue.Queue,
-             max_workers: int = 100, enrich_threads: int = 50) -> None:
+             max_workers: int = 100, enrich_threads: int = 50,
+             shodan_key: str = None) -> None:
     """Run a full scan and push events into q. Puts None when done."""
 
     def emit(data: dict) -> None:
@@ -146,6 +152,21 @@ def run_scan(domain: str, q: queue.Queue,
 
         enriched = collect_enrichment(resolved, threads=enrich_threads)
 
+        # ── Phase 5.5: Shodan Enrichment (Optional) ──────────────────────────
+        if shodan_key and shodan_lib:
+            emit({"type": "status", "message": "Enriching results with Shodan data..."})
+            api = shodan_lib.Shodan(shodan_key)
+            for host, ip in resolved.items():
+                try:
+                    s_info = api.host(ip)
+                    enriched[host]["shodan"] = {
+                        "org":   s_info.get("org", ""),
+                        "os":    s_info.get("os", ""),
+                        "ports": s_info.get("ports", []),
+                    }
+                except Exception:
+                    continue
+
         emit({"type": "status", "message": f"Enrichment complete — {len(enriched)} hosts processed"})
 
         for host, data in enriched.items():
@@ -163,6 +184,7 @@ def run_scan(domain: str, q: queue.Queue,
                 "http":     data.get("http", {}),
                 "ssl":      data.get("ssl", {}),
                 "ports":    data.get("ports", []),
+                "shodan":   data.get("shodan", {}),
                 "takeover": data.get("takeover"),
             })
 
