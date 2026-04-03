@@ -21,6 +21,7 @@ import dns.zone
 import dns.query
 import dns.exception
 import urllib3
+import whois as whois_lib
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ── DNS enumeration ───────────────────────────────────────────────────────────
@@ -161,6 +162,33 @@ def fetch_hackertarget(domain: str) -> set[str]:
     except Exception as ex:
         print(f"[!] HackerTarget error: {ex}")
         return set()
+
+
+def fetch_whois(domain: str) -> dict:
+    """Return WHOIS data for a domain as a plain dict."""
+    try:
+        w = whois_lib.whois(domain)
+        def _first(val):
+            """Return first item if list, else the value itself, as a string."""
+            if isinstance(val, list):
+                val = val[0] if val else None
+            return str(val) if val is not None else ""
+        ns = w.name_servers
+        if isinstance(ns, (list, set)):
+            ns = sorted({str(n).lower().rstrip(".") for n in ns if n})
+        else:
+            ns = [str(ns).lower().rstrip(".")] if ns else []
+        return {
+            "registrar":     _first(w.registrar),
+            "creation_date": _first(w.creation_date),
+            "expiry_date":   _first(w.expiration_date),
+            "updated_date":  _first(w.updated_date),
+            "name_servers":  ns,
+            "status":        w.status if isinstance(w.status, list) else ([w.status] if w.status else []),
+            "emails":        w.emails if isinstance(w.emails, list) else ([w.emails] if w.emails else []),
+        }
+    except Exception:
+        return {}
 
 
 # ── active DNS brute-force ─────────────────────────────────────────────────────
