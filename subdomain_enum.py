@@ -167,14 +167,24 @@ COMMON_SUBDOMAINS = [
     "m", "mobile", "wap", "touch",
 
     # ── API & services ────────────────────────────────────────────────────────
-    "api", "api2", "api-v1", "api-v2", "api-v3", "apiv1", "apiv2",
-    "apis", "api-gateway", "gateway", "gw",
+    "api", "api2", "api3", "api4", "api0",
+    "api-v1", "api-v2", "api-v3", "api-v4", "apiv1", "apiv2", "apiv3",
+    "apis", "api-gateway", "api-gateway-dev", "api-gateway-staging",
+    "api-dev", "api-staging", "api-prod", "api-test", "api-uat",
+    "api-internal", "api-external", "api-public", "api-private",
+    "api-sandbox", "api-demo", "api-beta",
+    "gateway", "gw", "gw-api",
     "graphql", "grpc", "rest", "soap", "rpc",
-    "services", "service", "svc", "microservice",
+    "swagger", "openapi",
+    "services", "service", "svc", "microservice", "microservices",
     "backend", "server", "edge",
     "webhook", "webhooks", "callbacks",
     "partner-api", "partners", "partner",
+    "mobile-api", "public-api", "private-api",
+    "services-api", "integration", "integrations",
+    "connect", "connector", "connectors",
     "broker", "queue", "events", "stream",
+    "data", "data-api", "feeds", "export",
 
     # ── Environments ──────────────────────────────────────────────────────────
     "dev", "develop", "development",
@@ -542,6 +552,86 @@ TAKEOVER_FINGERPRINTS: dict[str, list[str]] = {
 SCAN_PORTS = [21, 22, 23, 25, 53, 80, 443, 445, 3306, 3389, 5432, 5900, 6379,
               8080, 8443, 8888, 9200, 27017]
 
+# API paths to probe on each discovered subdomain
+API_PATHS = [
+    # OpenAPI / Swagger docs
+    "/swagger-ui.html", "/swagger-ui/", "/swagger/",
+    "/api-docs", "/api-docs/", "/api/docs",
+    "/openapi.json", "/openapi.yaml", "/openapi/",
+    "/v1/api-docs", "/v2/api-docs", "/v3/api-docs",
+    "/docs", "/docs/", "/redoc", "/redoc/",
+    # Versioned API roots
+    "/api", "/api/", "/api/v1", "/api/v2", "/api/v3",
+    "/v1", "/v2", "/v3",
+    # GraphQL
+    "/graphql", "/graphiql", "/playground",
+    # Health / status / actuator
+    "/health", "/healthz", "/health/live", "/health/ready",
+    "/actuator", "/actuator/health", "/actuator/info", "/actuator/env",
+    "/status", "/ping", "/metrics",
+    # Admin / debug panels
+    "/admin", "/admin/", "/console", "/debug",
+    "/phpinfo.php", "/.env", "/config.json",
+    # Common API gateways
+    "/gateway", "/proxy", "/internal/api",
+]
+
+# Signals that confirm it's a real API endpoint (not a generic 200)
+API_SIGNALS = [
+    "swagger", "openapi", "redoc", "api-docs",
+    "application/json", "application/yaml",
+    '"paths"', '"swagger":', '"openapi":', '"info":{',
+    "graphql", "introspection",
+    '"status":', '"health":', '"version":',
+    "actuator",
+]
+
+
+def probe_api_paths(host: str, timeout: float = 4.0) -> list[dict]:
+    """
+    Probe common API paths on a host.
+    Returns list of {path, status, content_type, note} for interesting hits.
+    """
+    found = []
+    session = requests.Session()
+    hdrs = {"User-Agent": "Mozilla/5.0"}
+
+    # Determine base URL — prefer HTTPS
+    base = f"https://{host}"
+    try:
+        requests.get(base, timeout=3, verify=False, headers=hdrs)
+    except Exception:
+        base = f"http://{host}"
+
+    def _probe(path: str) -> dict | None:
+        url = base + path
+        try:
+            r = session.get(url, timeout=timeout, verify=False,
+                            headers=hdrs, allow_redirects=True)
+            if r.status_code in (200, 201, 204, 401, 403):
+                ct   = r.headers.get("content-type", "")
+                body = r.text[:2000].lower()
+                note = next((s for s in API_SIGNALS if s in body or s in ct.lower()), "")
+                # Skip generic HTML pages — must have a signal or be JSON/YAML
+                if not note and "text/html" in ct and r.status_code not in (401, 403):
+                    return None
+                return {
+                    "path":         path,
+                    "status":       r.status_code,
+                    "content_type": ct.split(";")[0].strip(),
+                    "note":         note,
+                }
+        except Exception:
+            pass
+        return None
+
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        for result in ex.map(_probe, API_PATHS):
+            if result:
+                found.append(result)
+
+    return found
+
 
 def check_ports(ip: str, timeout: float = 1.5) -> list[int]:
     """TCP connect scan against common ports. Returns list of open ports."""
@@ -673,6 +763,7 @@ def collect_enrichment(resolved: dict[str, str], threads: int = 100) -> dict[str
         f_rdns     = {host: ex.submit(reverse_dns,       ip)   for host, ip in items}
         f_ports    = {host: ex.submit(check_ports,       ip)   for host, ip in items}
         f_takeover = {host: ex.submit(check_takeover,    host) for host, _ in items}
+        f_api      = {host: ex.submit(probe_api_paths,   host) for host, _ in items}
 
     for host, ip in items:
         enriched[host] = {
@@ -683,6 +774,7 @@ def collect_enrichment(resolved: dict[str, str], threads: int = 100) -> dict[str
             "rdns":     f_rdns[host].result(),
             "ports":    f_ports[host].result(),
             "takeover": f_takeover[host].result(),
+            "api":      f_api[host].result(),
         }
     return enriched
 
