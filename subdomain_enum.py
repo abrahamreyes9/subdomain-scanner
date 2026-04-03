@@ -13,6 +13,7 @@ import requests
 import httpx
 import re
 import ssl
+import ipaddress
 import dns.resolver
 import dns.reversename
 import dns.zone
@@ -39,6 +40,7 @@ _verbose: bool = False
 _custom_nameservers: list[str] = []
 _verify_ssl: bool = True           # Default True — use --insecure to disable
 MAX_WORKERS: int = 100             # Default concurrency for brute-force / resolve
+DNS_TIMEOUT: float = 3.0           # Shared DNS query timeout (seconds)
 _thread_local = threading.local()  # Thread-local resolver cache
 
 
@@ -77,7 +79,7 @@ console = Console()
 
 def _vprint(*args, **kwargs) -> None:
     if _verbose:
-        print(*args, **kwargs)
+        console.print(*args, **kwargs)
 
 
 def _phase(msg: str) -> None:
@@ -405,7 +407,7 @@ COMMON_SUBDOMAINS = [
 def resolve(subdomain: str) -> tuple[str, str] | None:
     """Resolve a hostname to its A record using the configured resolver."""
     try:
-        answer = _get_resolver(timeout=3.0).resolve(subdomain, "A")
+        answer = _get_resolver(timeout=DNS_TIMEOUT).resolve(subdomain, "A")
         return (subdomain, str(answer[0]))
     except Exception:
         return None
@@ -430,7 +432,8 @@ async def _async_resolve(domains: set[str]) -> dict[str, str]:
             continue
         name, ip = r
         out[name] = ip
-        _vprint(f"  [+] {name:<48} {ip}")
+        if _verbose:
+            console.print(f"  [+] {name:<48} {ip}")
     return out
 
 
@@ -446,9 +449,11 @@ def brute_force(domain: str, wordlist: list[str], threads: int = MAX_WORKERS) ->
                 if result:
                     host, ip = result
                     found.add(host)
-                    _vprint(f"  [+] {host:<48} {ip}")
+                    if _verbose:
+                        console.print(f"  [+] {host:<48} {ip}")
             except Exception as e:
-                _vprint("[!] thread error:", e)
+                if _verbose:
+                    console.print(f"[!] thread error: {e}")
     return found
 
 
@@ -499,7 +504,7 @@ def resolve_ip(hostname: str) -> str:
 def reverse_dns(ip: str) -> str:
     try:
         rev = dns.reversename.from_address(ip)
-        return str(_get_resolver(timeout=3.0).resolve(rev, "PTR")[0]).rstrip(".")
+        return str(_get_resolver(timeout=DNS_TIMEOUT).resolve(rev, "PTR")[0]).rstrip(".")
     except Exception:
         return ""
 
@@ -703,7 +708,7 @@ def check_ports(ip: str, timeout: float = 1.5) -> list[int]:
 def check_takeover(host: str) -> dict | None:
     """Check if a subdomain CNAME points to an unclaimed service."""
     try:
-        resolver = _get_resolver(timeout=3)
+        resolver = _get_resolver(timeout=DNS_TIMEOUT)
         try:
             answers = resolver.resolve(host, "CNAME")
             cname   = str(answers[0].target).rstrip(".").lower()
@@ -799,14 +804,29 @@ def get_ssl_cert_info(host: str, timeout: float = 5.0) -> dict:
 def _enrich_batch(batch: list[tuple[str, str]], threads: int) -> dict[str, dict]:
     """Enrich a single batch of (host, ip) pairs."""
     enriched = {}
-    with ThreadPoolExecutor(max_workers=threads) as ex:
-        f_info     = {host: ex.submit(get_ip_info,      ip)   for host, ip in batch}
-        f_http     = {host: ex.submit(probe_http,        host) for host, _ in batch}
-        f_ssl      = {host: ex.submit(get_ssl_cert_info, host) for host, _ in batch}
-        f_rdns     = {host: ex.submit(reverse_dns,       ip)   for host, ip in batch}
-        f_ports    = {host: ex.submit(check_ports,       ip)   for host, ip in batch}
-        f_takeover = {host: ex.submit(check_takeover,    host) for host, _ in batch}
+    
+    # SSRF Protection: Filter out private/loopback IPs before probing
+    safe_batch = []
     for host, ip in batch:
+        try:
+            ip_obj = ipaddress.ip_address(ip)
+            if ip_obj.is_global:
+                safe_batch.append((host, ip))
+        except ValueError:
+            continue
+
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        f_info     = {host: ex.submit(get_ip_info,      ip)   for host, ip in safe_batch}
+        f_http     = {host: ex.submit(probe_http,        host) for host, _ in safe_batch}
+        f_ssl      = {host: ex.submit(get_ssl_cert_info, host) for host, _ in safe_batch}
+        f_rdns     = {host: ex.submit(reverse_dns,       ip)   for host, ip in safe_batch}
+        f_ports    = {host: ex.submit(check_ports,       ip)   for host, ip in safe_batch}
+        f_takeover = {host: ex.submit(check_takeover,    host) for host, _ in safe_batch}
+
+    for host, ip in batch:
+        if (host, ip) not in safe_batch:
+             enriched[host] = {"ip": ip, "info": {"country": "Private IP - Probing Skipped"}, "http": {}, "ssl": {}, "rdns": "", "ports": [], "takeover": None}
+             continue
         try:
             enriched[host] = {
                 "ip":       ip,
@@ -953,7 +973,8 @@ from pathlib import Path
 def generate_csv(resolved: dict[str, str], enriched: dict[str, dict], path: str) -> None:
     fields = ["host","ip","rdns","asn","asn_name","cidr","country",
               "http_server","http_title","https_server","https_title",
-              "http8080_server","tech","ssl_cn","ssl_o"]
+              "http8080_server","tech","ssl_cn","ssl_o",
+              "shodan_org","shodan_os","shodan_ports"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
@@ -962,6 +983,7 @@ def generate_csv(resolved: dict[str, str], enriched: dict[str, dict], path: str)
             info = d.get("info", {})
             http = d.get("http", {})
             ssl  = d.get("ssl", {})
+            shod = d.get("shodan", {})
             asn, asn_name = _parse_org(info)
             def svc(label, key):
                 return http.get(label, {}).get(key, "")
@@ -975,6 +997,9 @@ def generate_csv(resolved: dict[str, str], enriched: dict[str, dict], path: str)
                 "tech": " | ".join(http.get("http",{}).get("tech",[]) or
                                    http.get("https",{}).get("tech",[])),
                 "ssl_cn": ssl.get("cn",""), "ssl_o": ssl.get("o",""),
+                "shodan_org":   shod.get("org", ""),
+                "shodan_os":    shod.get("os", "") or "",
+                "shodan_ports": " ".join(str(p) for p in shod.get("ports", [])),
             })
     print(f"[+] CSV saved → {path}")
 
@@ -1006,7 +1031,7 @@ def generate_json(resolved: dict[str, str], enriched: dict[str, dict], path: str
 def _h(text: str) -> str:
     """HTML-escape a string."""
     return (str(text)
-            .replace("&","&amp;").replace("<","&lt;")
+            .replace("&","&amp;").replace("<","&lt;").replace("'","&#39;")
             .replace(">","&gt;").replace('"',"&quot;"))
 
 
@@ -1022,6 +1047,7 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
         rdns = d.get("rdns", "")
         asn, asn_name = _parse_org(info)
 
+        shod     = d.get("shodan", {})
         services = []
         for label, svc in http.items():
             s = f"<b>{_h(label)}</b>: {_h(svc.get('server',''))}"
@@ -1032,6 +1058,11 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
             services.append(s)
         if ssl.get("cn"):
             services.append(f"<span class='dim'>CN: {_h(ssl['cn'])}</span>")
+        if shod.get("org"):
+            shod_ports = " ".join(str(p) for p in shod.get("ports", []))
+            shod_os    = f" / {_h(shod['os'])}" if shod.get("os") else ""
+            services.append(f"<span class='tag'>Shodan: {_h(shod['org'])}{shod_os}"
+                            + (f" [{shod_ports}]" if shod_ports else "") + "</span>")
 
         rows_a.append(f"""
         <tr>
@@ -1206,9 +1237,11 @@ def resolve_all(subdomains: set[str], threads: int = MAX_WORKERS) -> dict[str, s
                 if result:
                     host, ip = result
                     resolved[host] = ip
-                    _vprint(f"  [+] {host:<48} {ip}")
+                    if _verbose:
+                        console.print(f"  [+] {host:<48} {ip}")
             except Exception as e:
-                _vprint("[!] thread error:", e)
+                if _verbose:
+                    console.print(f"[!] thread error: {e}")
     return resolved
 
 
@@ -1230,7 +1263,6 @@ def main():
                         help="Disable TLS certificate verification")
     parser.add_argument("--shodan-key", metavar="KEY",
                         help="Shodan API key for additional host enrichment (optional)")
-    parser.set_defaults(verify_ssl=True)
     args = parser.parse_args()
 
     configure(nameservers=args.dns, verbose=args.verbose, verify_ssl=args.verify_ssl)
@@ -1273,28 +1305,41 @@ def main():
         console.print(f"  crt.sh: [cyan]{len(crt)}[/cyan]  HackerTarget: [cyan]{len(ht)}[/cyan]")
         _print_scan_summary(found, resolved)
 
-    # ── Brute-force ───────────────────────────────────────────────────────────
-    if not args.no_brute:
-        wordlist = COMMON_SUBDOMAINS
-        if args.wordlist:
-            try:
-                with open(args.wordlist) as f:
-                    wordlist = [l.strip() for l in f if l.strip()]
-            except FileNotFoundError:
-                console.print(f"  [red]Wordlist not found: {args.wordlist}[/red]")
-        _phase(f"Brute-forcing {len(wordlist)} subdomains with aiodns...")
-        brute = asyncio.run(_async_resolve({f"{w}.{domain}" for w in wordlist}))
-        found |= set(brute.keys())
-        resolved.update(brute)
-        console.print(f"  Brute-force live: [cyan]{len(brute)}[/cyan]")
-        _print_scan_summary(found, resolved)
+    # ── Brute-force + passive resolve (single event loop) ────────────────────
+    wordlist = COMMON_SUBDOMAINS
+    if not args.no_brute and args.wordlist:
+        try:
+            with open(args.wordlist) as f:
+                wordlist = [l.strip() for l in f if l.strip()]
+        except FileNotFoundError:
+            console.print(f"  [red]Wordlist not found: {args.wordlist}[/red]")
 
-    # ── Resolve passive/DNS candidates ────────────────────────────────────────
-    passive_only = found - set(resolved.keys())
-    if passive_only:
-        _phase(f"Resolving {len(passive_only)} passive/DNS subdomains with aiodns...")
-        passive_resolved = asyncio.run(_async_resolve(passive_only))
-        resolved.update(passive_resolved)
+    passive_candidates = found - set(resolved.keys())
+    brute_candidates   = {f"{w}.{domain}" for w in wordlist} if not args.no_brute else set()
+
+    if brute_candidates or passive_candidates:
+        if brute_candidates:
+            _phase(f"Brute-forcing {len(brute_candidates)} subdomains with aiodns...")
+        if passive_candidates:
+            _phase(f"Resolving {len(passive_candidates)} passive/DNS subdomains with aiodns...")
+
+        async def _resolve_both():
+            return await asyncio.gather(
+                _async_resolve(brute_candidates),
+                _async_resolve(passive_candidates),
+            )
+
+        brute, passive_resolved = asyncio.run(_resolve_both())
+
+        if brute_candidates:
+            found |= set(brute.keys())
+            resolved.update(brute)
+            console.print(f"  Brute-force live: [cyan]{len(brute)}[/cyan]")
+
+        if passive_candidates:
+            resolved.update(passive_resolved)
+
+        _print_scan_summary(found, resolved)
 
     console.print(f"\n[bold green]{len(resolved)} live subdomains found for {domain}[/bold green]")
     _print_scan_summary(found, resolved)
@@ -1321,7 +1366,8 @@ def main():
                     "os":    info.get("os", ""),
                     "ports": info.get("ports", []),
                 }
-            except shodan_lib.APIError:
+            except shodan_lib.APIError as e:
+                console.print(f"  [yellow]⚠ Shodan {ip}: {e}[/yellow]")
                 continue
 
     # ── Reports ───────────────────────────────────────────────────────────────

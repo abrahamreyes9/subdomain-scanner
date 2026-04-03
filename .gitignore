@@ -1,9 +1,15 @@
 __pycache__/
-*.pyc
-*.pyo
-.env
-venv/
+*.py[cod]
+*$py.class
 .venv/
-*.csv
-*.html
-!static/*.html
+venv/
+ENV/
+
+# Reports and sensitive data
+*_report.csv
+*_report.json
+*_report.html
+.env
+
+# OS files
+.DS_Store

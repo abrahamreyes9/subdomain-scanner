@@ -7,6 +7,7 @@ import json
 import queue
 import threading
 import uuid
+import re
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -37,7 +38,10 @@ class ScanRequest(BaseModel):
 @app.post("/api/scan")
 async def start_scan(req: ScanRequest):
     domain = req.domain.strip().lower().rstrip(".")
-    if not domain or "." not in domain:
+    
+    # Basic domain regex validation to prevent injection and invalid inputs
+    domain_regex = r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$"
+    if not domain or not re.match(domain_regex, domain):
         raise HTTPException(400, "Invalid domain")
 
     scan_id = str(uuid.uuid4())

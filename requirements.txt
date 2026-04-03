@@ -1,12 +1,11 @@
 fastapi
-uvicorn[standard]
+uvicorn
+pydantic
 requests
-dnspython
-urllib3
-python-multipart
-python-whois
-aiodns
 httpx
+dnspython
+aiodns
 ipwhois
 rich
+python-whois
 shodan
