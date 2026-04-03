@@ -136,11 +136,11 @@ def dns_records(domain: str) -> set[str]:
 
 # ── passive sources ────────────────────────────────────────────────────────────
 
-def fetch_crtsh(domain: str) -> set[str]:
+def fetch_crtsh(domain: str, timeout: float = 12.0) -> set[str]:
     """Query crt.sh certificate transparency logs."""
     url = f"https://crt.sh/?q=%.{domain}&output=json"
     try:
-        r = _http_session.get(url, timeout=20)
+        r = _http_session.get(url, timeout=timeout)
         r.raise_for_status()
         entries = r.json()
         subs = set()
@@ -155,11 +155,11 @@ def fetch_crtsh(domain: str) -> set[str]:
         return set()
 
 
-def fetch_hackertarget(domain: str) -> set[str]:
+def fetch_hackertarget(domain: str, timeout: float = 12.0) -> set[str]:
     """Query HackerTarget's free subdomain API."""
     url = f"https://api.hackertarget.com/hostsearch/?q={domain}"
     try:
-        r = _http_session.get(url, timeout=20)
+        r = _http_session.get(url, timeout=timeout)
         r.raise_for_status()
         subs = set()
         for line in r.text.splitlines():
@@ -570,20 +570,18 @@ def _probe_one(session: requests.Session, scheme: str, port: int,
         return label, None
 
 
-def probe_http(host: str, timeout: float = 5.0) -> dict:
-    """Probe HTTP and HTTPS on a host concurrently, return service info."""
+def probe_http(host: str, timeout: float = 3.0) -> dict:
+    """Probe HTTP and HTTPS on a host, return service info."""
     targets = [("https", 443), ("http", 80), ("http", 8080)]
     result  = {}
-    with ThreadPoolExecutor(max_workers=len(targets)) as ex:
-        futures = [ex.submit(_probe_one, _http_session, s, p, host, timeout) for s, p in targets]
-        for f in as_completed(futures):
-            label, entry = f.result()
-            if entry:
-                result[label] = entry
+    for scheme, port in targets:
+        label, entry = _probe_one(_http_session, scheme, port, host, timeout)
+        if entry:
+            result[label] = entry
     return result
 
 
-def get_ssl_cert_info(host: str, timeout: float = 5.0) -> dict:
+def get_ssl_cert_info(host: str, timeout: float = 3.0) -> dict:
     """Return CN and O from the SSL cert of a host."""
     try:
         ctx = ssl.create_default_context()
@@ -604,29 +602,43 @@ def get_ssl_cert_info(host: str, timeout: float = 5.0) -> dict:
         return {}
 
 
-def collect_enrichment(resolved: dict[str, str], threads: int = 100) -> dict[str, dict]:
+def collect_enrichment(
+    resolved: dict[str, str],
+    threads: int = 100,
+    http_timeout: float = 3.0,
+    ssl_timeout: float = 3.0,
+    do_http: bool = True,
+    do_ssl: bool = True,
+    do_rdns: bool = True,
+    enrich_limit: int = 0,
+) -> dict[str, dict]:
     """Enrich all resolved hosts using a single flat thread pool.
 
     All sub-tasks (IP info, HTTP probe, SSL cert, rDNS) for every host are
     submitted directly — no nested executors, no per-host pool spin-up.
     """
     items = sorted(resolved.items())
+    if enrich_limit > 0:
+        items = items[:enrich_limit]
     enriched: dict[str, dict] = {}
 
     with ThreadPoolExecutor(max_workers=threads) as ex:
         f_info = {host: ex.submit(get_ip_info,        ip)   for host, ip in items}
-        f_http = {host: ex.submit(probe_http,          host) for host, _ in items}
-        f_ssl  = {host: ex.submit(get_ssl_cert_info,   host) for host, _ in items}
-        f_rdns = {host: ex.submit(reverse_dns,         ip)   for host, ip in items}
+        f_http = ({host: ex.submit(probe_http, host, http_timeout) for host, _ in items}
+                  if do_http else {})
+        f_ssl  = ({host: ex.submit(get_ssl_cert_info, host, ssl_timeout) for host, _ in items}
+                  if do_ssl else {})
+        f_rdns = ({host: ex.submit(reverse_dns, ip) for host, ip in items}
+                  if do_rdns else {})
 
         # Collect results inside the context so futures are guaranteed complete
         for host, ip in items:
             enriched[host] = {
                 "ip":   ip,
                 "info": f_info[host].result(),
-                "http": f_http[host].result(),
-                "ssl":  f_ssl[host].result(),
-                "rdns": f_rdns[host].result(),
+                "http": f_http[host].result() if do_http else {},
+                "ssl":  f_ssl[host].result() if do_ssl else {},
+                "rdns": f_rdns[host].result() if do_rdns else "",
             }
     return enriched
 
@@ -1027,8 +1039,16 @@ def main():
     parser.add_argument("domain", help="Target domain, e.g. hollard.com.au")
     parser.add_argument("--no-brute", action="store_true", help="Skip DNS brute-force")
     parser.add_argument("--no-passive", action="store_true", help="Skip passive sources")
+    parser.add_argument("--no-http-probe", action="store_true", help="Skip HTTP/HTTPS probing")
+    parser.add_argument("--no-ssl", action="store_true", help="Skip SSL certificate lookup")
+    parser.add_argument("--no-rdns", action="store_true", help="Skip reverse DNS lookups")
+    parser.add_argument("--quick", action="store_true", help="Faster scan with lighter enrichment defaults")
     parser.add_argument("--wordlist", help="Path to custom wordlist (one word per line)")
     parser.add_argument("--threads", type=int, default=100, help="Concurrent threads (default 100)")
+    parser.add_argument("--http-timeout", type=float, default=3.0, help="HTTP probe timeout in seconds (default 3.0)")
+    parser.add_argument("--ssl-timeout", type=float, default=3.0, help="SSL timeout in seconds (default 3.0)")
+    parser.add_argument("--passive-timeout", type=float, default=12.0, help="Passive source timeout in seconds (default 12.0)")
+    parser.add_argument("--enrich-limit", type=int, default=0, help="Only enrich first N resolved hosts (0 = all)")
     parser.add_argument("--output", help="Save results to file")
     args = parser.parse_args()
 
@@ -1063,8 +1083,8 @@ def main():
     if not args.no_passive:
         print("[*] Querying passive sources in parallel (crt.sh, HackerTarget) ...")
         with ThreadPoolExecutor(max_workers=3) as ex:
-            f_crt = ex.submit(fetch_crtsh, domain)
-            f_ht  = ex.submit(fetch_hackertarget, domain)
+            f_crt = ex.submit(fetch_crtsh, domain, args.passive_timeout)
+            f_ht  = ex.submit(fetch_hackertarget, domain, args.passive_timeout)
             crt = f_crt.result()
             ht  = f_ht.result()
         print(f"    crt.sh: {len(crt)}  HackerTarget: {len(ht)}")
@@ -1103,9 +1123,29 @@ def main():
                 f.write(f"{host},{ip}\n")
         print(f"[+] Saved to {args.output}")
 
-    # Enrich all hosts (HTTP probe + IP info + SSL + rDNS)
+    do_http = not args.no_http_probe
+    do_ssl  = not args.no_ssl
+    do_rdns = not args.no_rdns
+    enrich_limit = args.enrich_limit
+    if args.quick:
+        # Quick mode prioritizes speed over depth.
+        do_http = False
+        do_ssl = False
+        do_rdns = False
+        enrich_limit = enrich_limit or 100
+
+    # Enrich hosts (IP info always; optional HTTP probe + SSL + rDNS)
     print("\n[*] Enriching subdomains (HTTP/HTTPS probe, IP info, SSL, rDNS) ...")
-    enriched = collect_enrichment(resolved, threads=args.threads)
+    enriched = collect_enrichment(
+        resolved,
+        threads=args.threads,
+        http_timeout=args.http_timeout,
+        ssl_timeout=args.ssl_timeout,
+        do_http=do_http,
+        do_ssl=do_ssl,
+        do_rdns=do_rdns,
+        enrich_limit=enrich_limit,
+    )
 
     # A records report (terminal)
     print_a_records(resolved, enriched)
