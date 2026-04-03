@@ -1168,7 +1168,7 @@ def main():
     _print_whois_summary(whois_data)
 
     # DNS (enumeration + record collection)
-    _phase_progress(2, total_phases, "DNS")
+    _phase_progress(2, total_phases, "DNS (Discovery + Records)")
     print("[DNS] Discovering authoritative nameservers...")
     nameservers = get_nameservers(domain)
     if nameservers:
@@ -1197,6 +1197,8 @@ def main():
         f"TXT={len(dns_data.get('txt', []))}, "
         f"SOA={'yes' if dns_data.get('soa') else 'no'}"
     )
+    print("[DNS] Printing unified DNS report output...")
+    print_dns_report(dns_data)
 
     # Passive recon — run sources in parallel
     _phase_progress(3, total_phases, "Passive")
@@ -1278,9 +1280,6 @@ def main():
 
     # A records report (terminal)
     print_a_records(resolved, enriched)
-
-    # DNS report (terminal) - already collected in DNS phase
-    print_dns_report(dns_data)
 
     # Output reports
     stem = domain.replace(".", "_")
