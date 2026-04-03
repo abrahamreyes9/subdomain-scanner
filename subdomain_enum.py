@@ -872,11 +872,22 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
     --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3e;
     --text: #e2e8f0; --dim: #6b7280; --accent: #6366f1;
     --green: #10b981; --amber: #f59e0b; --red: #ef4444;
+    --asn-bg: #1e293b; --tag-bg: #0d2137; --tag-fg: #38bdf8;
+  }}
+  body.light {{
+    --bg: #f8fafc; --surface: #ffffff; --border: #e2e8f0;
+    --text: #1e293b; --dim: #64748b; --accent: #4f46e5;
+    --green: #059669; --amber: #d97706; --red: #dc2626;
+    --asn-bg: #e0e7ff; --tag-bg: #dbeafe; --tag-fg: #1d4ed8;
   }}
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{ background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; font-size: 14px; padding: 24px; }}
   h1 {{ font-size: 1.5rem; margin-bottom: 4px; color: var(--accent); }}
   .meta {{ color: var(--dim); font-size: 12px; margin-bottom: 32px; }}
+  .header-row {{ display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }}
+  .theme-toggle {{ background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+                   padding: 5px 12px; font-size: 12px; color: var(--dim); cursor: pointer; }}
+  .theme-toggle:hover {{ color: var(--text); border-color: var(--accent); }}
   .stat-bar {{ display: flex; gap: 16px; margin-bottom: 32px; flex-wrap: wrap; }}
   .stat {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
            padding: 12px 20px; min-width: 120px; }}
@@ -896,9 +907,9 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
   td a:hover {{ text-decoration: underline; }}
   .mono {{ font-family: monospace; font-size: 12px; }}
   .dim {{ color: var(--dim); }}
-  .asn {{ background: #1e293b; color: var(--amber); font-family: monospace; font-size: 11px;
+  .asn {{ background: var(--asn-bg); color: var(--amber); font-family: monospace; font-size: 11px;
           padding: 1px 6px; border-radius: 4px; white-space: nowrap; }}
-  .tag {{ display: inline-block; background: #0d2137; color: #38bdf8; font-size: 11px;
+  .tag {{ display: inline-block; background: var(--tag-bg); color: var(--tag-fg); font-size: 11px;
           padding: 1px 6px; border-radius: 4px; margin-top: 2px; }}
   .txt-record {{ background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
                  padding: 10px 14px; margin-bottom: 8px; font-family: monospace; font-size: 12px;
@@ -908,9 +919,25 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
   .soa-table td {{ padding: 8px 14px; font-family: monospace; }}
   .soa-table tr {{ border-top: 1px solid var(--border); }}
 </style>
+<script>
+  (function() {{
+    if (localStorage.getItem('theme') === 'light') document.documentElement.classList.add('light-pending');
+  }})();
+</script>
 </head>
 <body>
-<h1>Subdomain Recon Report</h1>
+<script>
+  if (localStorage.getItem('theme') === 'light') document.body.classList.add('light');
+  function toggleTheme() {{
+    var light = document.body.classList.toggle('light');
+    localStorage.setItem('theme', light ? 'light' : 'dark');
+    document.getElementById('theme-btn').textContent = light ? '🌙 Dark mode' : '☀️ Light mode';
+  }}
+</script>
+<div class="header-row">
+  <h1>Subdomain Recon Report</h1>
+  <button id="theme-btn" class="theme-toggle" onclick="toggleTheme()">☀️ Light mode</button>
+</div>
 <p class="meta">Target: <strong>{_h(domain)}</strong> &nbsp;|&nbsp; Generated: {now}</p>
 
 <div class="stat-bar">
