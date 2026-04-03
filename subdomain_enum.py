@@ -971,33 +971,33 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
 <title>Subdomain Report – {_h(domain)}</title>
 <style>
   :root {{
-    --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3e;
-    --text: #e2e8f0; --dim: #6b7280; --accent: #6366f1;
-    --green: #10b981; --amber: #f59e0b; --red: #ef4444;
-    --asn-bg: #1e293b; --tag-bg: #0d2137; --tag-fg: #38bdf8;
+    --bg: #050a05; --surface: #0b140b; --border: #1f3a1f;
+    --text: #b7ffbf; --dim: #6faa72; --accent: #39ff14;
+    --green: #39ff14; --amber: #b6ff00; --red: #ff4d6d;
+    --asn-bg: #102110; --tag-bg: #0f2412; --tag-fg: #8dff9a;
   }}
   body.light {{
-    --bg: #f8fafc; --surface: #ffffff; --border: #e2e8f0;
-    --text: #1e293b; --dim: #64748b; --accent: #4f46e5;
-    --green: #059669; --amber: #d97706; --red: #dc2626;
-    --asn-bg: #e0e7ff; --tag-bg: #dbeafe; --tag-fg: #1d4ed8;
+    --bg: #f4fff4; --surface: #ffffff; --border: #cce7cc;
+    --text: #103010; --dim: #3f6b3f; --accent: #0f7a2a;
+    --green: #0f7a2a; --amber: #6b8e00; --red: #b42318;
+    --asn-bg: #dff5df; --tag-bg: #e9fbe9; --tag-fg: #1f6f2f;
   }}
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{ background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; font-size: 14px; padding: 24px; }}
-  h1 {{ font-size: 1.5rem; margin-bottom: 4px; color: var(--accent); }}
+  h1 {{ font-size: 1.5rem; margin-bottom: 4px; color: var(--accent); letter-spacing: .04em; text-shadow: 0 0 8px rgba(57,255,20,.28); }}
   .meta {{ color: var(--dim); font-size: 12px; margin-bottom: 32px; }}
   .header-row {{ display: block; margin-bottom: 4px; }}
   .theme-toggle {{ position: fixed; top: 14px; right: 14px; z-index: 1000;
                    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
                    padding: 5px 12px; font-size: 12px; color: var(--dim); cursor: pointer; }}
-  .theme-toggle:hover {{ color: var(--text); border-color: var(--accent); }}
+  .theme-toggle:hover {{ color: var(--text); border-color: var(--accent); box-shadow: 0 0 10px rgba(57,255,20,.2); }}
   @media (max-width: 640px) {{
     .theme-toggle {{ top: 10px; right: 10px; }}
   }}
   .stat-bar {{ display: flex; gap: 16px; margin-bottom: 32px; flex-wrap: wrap; }}
   .stat {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
            padding: 12px 20px; min-width: 120px; }}
-  .stat .num {{ font-size: 1.8rem; font-weight: 700; color: var(--accent); }}
+  .stat .num {{ font-size: 1.8rem; font-weight: 700; color: var(--accent); text-shadow: 0 0 8px rgba(57,255,20,.25); }}
   .stat .lbl {{ color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }}
   section {{ margin-bottom: 40px; }}
   h2 {{ font-size: 1rem; font-weight: 600; color: var(--accent); border-bottom: 1px solid var(--border);
@@ -1007,9 +1007,9 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
   thead th {{ background: var(--surface); color: var(--dim); font-size: 11px; text-transform: uppercase;
               letter-spacing: .05em; padding: 10px 14px; text-align: left; white-space: nowrap; }}
   tbody tr {{ border-top: 1px solid var(--border); }}
-  tbody tr:hover {{ background: var(--surface); }}
+  tbody tr:hover {{ background: #102010; }}
   td {{ padding: 10px 14px; vertical-align: top; word-break: break-word; max-width: 320px; }}
-  td a {{ color: var(--accent); text-decoration: none; }}
+  td a {{ color: var(--accent); text-decoration: none; font-weight: 600; }}
   td a:hover {{ text-decoration: underline; }}
   .mono {{ font-family: monospace; font-size: 12px; }}
   .dim {{ color: var(--dim); }}
