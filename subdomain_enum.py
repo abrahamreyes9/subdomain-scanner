@@ -12,6 +12,7 @@ import csv
 import re
 import ssl
 import json
+import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -77,6 +78,7 @@ def signal_handler(sig, frame):
 
 
 signal.signal(signal.SIGINT, signal_handler)
+_QUIET = False
 
 # ── DNS enumeration ───────────────────────────────────────────────────────────
 
@@ -401,6 +403,7 @@ def brute_force(domain: str, wordlist: list[str], threads: int = 100) -> dict[st
     """Resolve candidates concurrently, return {host: ip} for live hosts."""
     candidates = [f"{w}.{domain}" for w in wordlist]
     found: dict[str, str] = {}
+    start = time.time()
     with ThreadPoolExecutor(max_workers=threads) as ex:
         futures = {ex.submit(resolve, c): c for c in candidates}
         for f in as_completed(futures):
@@ -408,7 +411,11 @@ def brute_force(domain: str, wordlist: list[str], threads: int = 100) -> dict[st
             if result:
                 host, ip = result
                 found[host] = ip
-                print(f"  [+] {host:<48} {ip}")
+                if not _QUIET:
+                    print(f"  [+] {host:<48} {ip}")
+    elapsed = max(time.time() - start, 0.001)
+    rate = len(candidates) / elapsed
+    print(f"[BRUTE] Stats: tested={len(candidates)} live={len(found)} rate~{rate:.1f}/s")
     return found
 
 
@@ -880,6 +887,37 @@ def generate_csv(resolved: dict[str, str], enriched: dict[str, dict], path: str)
     print(f"[+] CSV saved → {path}")
 
 
+def generate_json(
+    domain: str,
+    resolved: dict[str, str],
+    enriched: dict[str, dict],
+    dns_data: dict,
+    path: str,
+    scan_started: float | None = None,
+) -> None:
+    payload = {
+        "target": domain,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "scan_started": datetime.fromtimestamp(scan_started).isoformat(timespec="seconds") if scan_started else "",
+        "live_count": len(resolved),
+        "subdomains": [
+            {"host": host, **enriched.get(host, {"ip": ip})}
+            for host, ip in sorted(resolved.items())
+        ],
+        "dns_records": dns_data,
+    }
+    Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"[+] JSON saved → {path}")
+
+
+def generate_ndjson(resolved: dict[str, str], enriched: dict[str, dict], path: str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        for host, ip in sorted(resolved.items()):
+            row = {"host": host, **enriched.get(host, {"ip": ip})}
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    print(f"[+] NDJSON saved → {path}")
+
+
 # ── HTML report ────────────────────────────────────────────────────────────────
 
 def _h(text: str) -> str:
@@ -1115,6 +1153,7 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
 def resolve_all(subdomains: set[str], threads: int = 100) -> dict[str, str]:
     """Resolve subdomains concurrently, printing each hit as it arrives."""
     resolved = {}
+    start = time.time()
     with ThreadPoolExecutor(max_workers=threads) as ex:
         futures = {ex.submit(resolve, s): s for s in subdomains}
         for f in as_completed(futures):
@@ -1122,7 +1161,11 @@ def resolve_all(subdomains: set[str], threads: int = 100) -> dict[str, str]:
             if result:
                 host, ip = result
                 resolved[host] = ip
-                print(f"  [+] {host:<48} {ip}")
+                if not _QUIET:
+                    print(f"  [+] {host:<48} {ip}")
+    elapsed = max(time.time() - start, 0.001)
+    rate = len(subdomains) / elapsed if subdomains else 0.0
+    print(f"[RESOLVE] Stats: checked={len(subdomains)} live={len(resolved)} rate~{rate:.1f}/s")
     return resolved
 
 
@@ -1134,9 +1177,21 @@ def _progress_bar(percent: int, width: int = 36) -> str:
     return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
 
 
-def _phase_progress(phase_idx: int, total_phases: int, phase_name: str) -> None:
+def _fmt_duration(seconds: float) -> str:
+    s = max(0, int(seconds))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h:02}:{m:02}:{sec:02}"
+
+
+def _phase_progress(phase_idx: int, total_phases: int, phase_name: str, scan_start: float) -> None:
     percent = int((phase_idx / total_phases) * 100)
-    print(f"\n[PROGRESS] {_progress_bar(percent)} {percent:>3}%  | Phase {phase_idx}/{total_phases}: {phase_name}")
+    elapsed = max(time.time() - scan_start, 0.001)
+    eta = ((elapsed / phase_idx) * (total_phases - phase_idx)) if phase_idx > 0 else 0.0
+    print(
+        f"\n[PROGRESS] {_progress_bar(percent)} {percent:>3}%  | "
+        f"Phase {phase_idx}/{total_phases}: {phase_name} | ETA: {_fmt_duration(eta)}"
+    )
 
 
 def _print_whois_summary(whois_data: dict) -> None:
@@ -1170,15 +1225,21 @@ def main():
     parser.add_argument("--passive-timeout", type=float, default=12.0, help="Passive source timeout in seconds (default 12.0)")
     parser.add_argument("--enrich-limit", type=int, default=0, help="Only enrich first N resolved hosts (0 = all)")
     parser.add_argument("--output", help="Save results to file")
+    parser.add_argument("--json-output", help="Save structured JSON report")
+    parser.add_argument("--ndjson-output", help="Save line-delimited JSON results")
+    parser.add_argument("--quiet", action="store_true", help="Suppress per-host live output")
     args = parser.parse_args()
+    global _QUIET
+    _QUIET = args.quiet
 
     domain = args.domain.lower().strip()
     total_phases = 6
+    scan_start = time.time()
     print("\nStarting Subdomain Recon Engine")
     print(f"Target: {domain}")
     print(f"Threads: {args.threads}")
     print("[INIT] Initializing scan modules, DNS resolvers, and HTTP probes...")
-    _phase_progress(0, total_phases, "Initialization")
+    _phase_progress(0, total_phases, "Initialization", scan_start)
 
     found: set[str] = set()
     # Track hosts already resolved during brute-force to avoid re-resolving them
@@ -1186,7 +1247,7 @@ def main():
     dns_data = {"mx": [], "ns": [], "txt": [], "soa": None}
 
     # WHOIS
-    _phase_progress(1, total_phases, "WHOIS")
+    _phase_progress(1, total_phases, "WHOIS", scan_start)
     if args.no_whois:
         print("[WHOIS] Skipped by operator flag (--no-whois).")
     elif not WHOIS_AVAILABLE:
@@ -1197,7 +1258,7 @@ def main():
         _print_whois_summary(whois_data)
 
     # DNS (enumeration + record collection)
-    _phase_progress(2, total_phases, "DNS (Discovery + Records)")
+    _phase_progress(2, total_phases, "DNS (Discovery + Records)", scan_start)
     print("[DNS] Discovering authoritative nameservers...")
     nameservers = get_nameservers(domain)
     if nameservers:
@@ -1230,7 +1291,7 @@ def main():
     print_dns_report(dns_data)
 
     # Passive recon — run sources in parallel
-    _phase_progress(3, total_phases, "Passive")
+    _phase_progress(3, total_phases, "Passive", scan_start)
     if not args.no_passive:
         print("[PASSIVE] Querying passive intel sources (crt.sh, HackerTarget)...")
         with ThreadPoolExecutor(max_workers=3) as ex:
@@ -1245,7 +1306,7 @@ def main():
         print("[PASSIVE] Skipped by operator flag (--no-passive).")
 
     # Brute-force — streams hits to screen as found, returns {host: ip}
-    _phase_progress(4, total_phases, "Brute-force")
+    _phase_progress(4, total_phases, "Brute-force", scan_start)
     if not args.no_brute:
         wordlist = COMMON_SUBDOMAINS
         if args.wordlist:
@@ -1266,7 +1327,7 @@ def main():
         print("[BRUTE] Skipped by operator flag (--no-brute).")
 
     # Resolve remaining subdomains not already resolved by brute-force
-    _phase_progress(5, total_phases, "Resolve")
+    _phase_progress(5, total_phases, "Resolve", scan_start)
     unresolved = found - set(pre_resolved.keys())
     print(f"[RESOLVE] Pending hosts: {len(unresolved)} | Pre-resolved from brute-force: {len(pre_resolved)}")
     print("[RESOLVE] Performing DNS A/AAAA resolution for discovered hostnames...")
@@ -1293,7 +1354,7 @@ def main():
         enrich_limit = enrich_limit or 100
 
     # Enrich hosts (IP info always; optional HTTP probe + SSL + rDNS)
-    _phase_progress(6, total_phases, "Enrich")
+    _phase_progress(6, total_phases, "Enrich", scan_start)
     print("[ENRICH] Enriching hosts with IP metadata and service intelligence...")
     print(f"[ENRICH] Options: http={do_http} ssl={do_ssl} rdns={do_rdns} limit={enrich_limit or 'all'}")
     enriched = collect_enrichment(
@@ -1314,6 +1375,10 @@ def main():
     stem = domain.replace(".", "_")
     generate_csv(resolved, enriched, f"{stem}_report.csv")
     generate_html(domain, resolved, enriched, dns_data, f"{stem}_report.html")
+    if args.json_output:
+        generate_json(domain, resolved, enriched, dns_data, args.json_output, scan_start)
+    if args.ndjson_output:
+        generate_ndjson(resolved, enriched, args.ndjson_output)
     print(f"\n[COMPLETE] {_progress_bar(100)} 100%  | Recon workflow finished for {domain}")
 
 
