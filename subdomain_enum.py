@@ -1092,6 +1092,31 @@ def resolve_all(subdomains: set[str], threads: int = 100) -> dict[str, str]:
     return resolved
 
 
+# ── scan progress & operator-style output ─────────────────────────────────────
+
+def _progress_bar(percent: int, width: int = 36) -> str:
+    pct = max(0, min(100, int(percent)))
+    filled = int(width * pct / 100)
+    return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
+
+
+def _phase_progress(phase_idx: int, total_phases: int, phase_name: str) -> None:
+    percent = int((phase_idx / total_phases) * 100)
+    print(f"\n[PROGRESS] {_progress_bar(percent)} {percent:>3}%  | Phase {phase_idx}/{total_phases}: {phase_name}")
+
+
+def _print_whois_summary(whois_data: dict) -> None:
+    if not whois_data:
+        print("[WHOIS] No WHOIS data returned.")
+        return
+    print("[WHOIS] Registrar     :", whois_data.get("registrar", ""))
+    print("[WHOIS] Created       :", whois_data.get("creation_date", ""))
+    print("[WHOIS] Updated       :", whois_data.get("updated_date", ""))
+    print("[WHOIS] Expires       :", whois_data.get("expiry_date", ""))
+    ns = whois_data.get("name_servers", []) or []
+    print("[WHOIS] Name servers  :", ", ".join(ns) if ns else "(none)")
+
+
 # ── main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1113,69 +1138,100 @@ def main():
     args = parser.parse_args()
 
     domain = args.domain.lower().strip()
-    print(f"\n[*] Target: {domain}\n")
+    total_phases = 6
+    print("\nStarting Subdomain Recon Engine")
+    print(f"Target: {domain}")
+    print(f"Threads: {args.threads}")
+    print("[INIT] Initializing scan modules, DNS resolvers, and HTTP probes...")
+    _phase_progress(0, total_phases, "Initialization")
 
     found: set[str] = set()
     # Track hosts already resolved during brute-force to avoid re-resolving them
     pre_resolved: dict[str, str] = {}
+    dns_data = {"mx": [], "ns": [], "txt": [], "soa": None}
 
-    # DNS enumeration
-    print("[*] Fetching nameservers ...")
+    # WHOIS
+    _phase_progress(1, total_phases, "WHOIS")
+    print("[WHOIS] Querying registrar and registration metadata...")
+    whois_data = fetch_whois(domain)
+    _print_whois_summary(whois_data)
+
+    # DNS (enumeration + record collection)
+    _phase_progress(2, total_phases, "DNS")
+    print("[DNS] Discovering authoritative nameservers...")
     nameservers = get_nameservers(domain)
     if nameservers:
-        print(f"    Nameservers: {', '.join(nameservers)}")
+        print(f"[DNS] Nameservers: {', '.join(nameservers)}")
     else:
-        print("    No nameservers found")
+        print("[DNS] No nameservers found")
 
-    print("[*] Attempting zone transfers (AXFR) ...")
+    print("[DNS] Attempting AXFR zone transfer checks...")
     axfr = attempt_zone_transfer(domain, nameservers)
     if axfr:
         found |= axfr
     else:
-        print("    Zone transfer refused (expected)")
+        print("[DNS] Zone transfer refused/blocked (expected).")
 
-    print("[*] Extracting subdomains from DNS records (NS/MX/TXT/SRV) ...")
+    print("[DNS] Extracting candidate hosts from NS/MX/TXT/SRV records...")
     dns_found = dns_records(domain)
-    print(f"    DNS records yielded {len(dns_found)} subdomains")
+    print(f"[DNS] Record extraction yielded {len(dns_found)} candidate subdomains.")
     found |= dns_found
 
+    print("[DNS] Enumerating MX/NS/TXT/SOA records for reporting...")
+    dns_data = collect_dns_records(domain)
+    print(
+        "[DNS] Record inventory: "
+        f"MX={len(dns_data.get('mx', []))}, "
+        f"NS={len(dns_data.get('ns', []))}, "
+        f"TXT={len(dns_data.get('txt', []))}, "
+        f"SOA={'yes' if dns_data.get('soa') else 'no'}"
+    )
+
     # Passive recon — run sources in parallel
+    _phase_progress(3, total_phases, "Passive")
     if not args.no_passive:
-        print("[*] Querying passive sources in parallel (crt.sh, HackerTarget) ...")
+        print("[PASSIVE] Querying passive intel sources (crt.sh, HackerTarget)...")
         with ThreadPoolExecutor(max_workers=3) as ex:
             f_crt = ex.submit(fetch_crtsh, domain, args.passive_timeout)
             f_ht  = ex.submit(fetch_hackertarget, domain, args.passive_timeout)
             crt = f_crt.result()
             ht  = f_ht.result()
-        print(f"    crt.sh: {len(crt)}  HackerTarget: {len(ht)}")
+        print(f"[PASSIVE] Results: crt.sh={len(crt)} | HackerTarget={len(ht)}")
         found |= crt
         found |= ht
+    else:
+        print("[PASSIVE] Skipped by operator flag (--no-passive).")
 
     # Brute-force — streams hits to screen as found, returns {host: ip}
+    _phase_progress(4, total_phases, "Brute-force")
     if not args.no_brute:
         wordlist = COMMON_SUBDOMAINS
         if args.wordlist:
             try:
                 with open(args.wordlist) as f:
                     wordlist = [l.strip() for l in f if l.strip()]
-                print(f"[*] Brute-forcing with custom wordlist ({len(wordlist)} words) ...")
+                print(f"[BRUTE] Using custom wordlist ({len(wordlist)} entries).")
             except FileNotFoundError:
                 print(f"[!] Wordlist not found: {args.wordlist}")
         else:
-            print(f"[*] Brute-forcing with built-in wordlist ({len(wordlist)} words) ...")
+            print(f"[BRUTE] Using built-in wordlist ({len(wordlist)} entries).")
+        print("[BRUTE] Launching high-concurrency DNS brute-force...")
         brute = brute_force(domain, wordlist, threads=args.threads)
-        print(f"    Brute-force: {len(brute)} live")
+        print(f"[BRUTE] Live discoveries: {len(brute)}")
         pre_resolved.update(brute)
         found |= set(brute.keys())
+    else:
+        print("[BRUTE] Skipped by operator flag (--no-brute).")
 
     # Resolve remaining subdomains not already resolved by brute-force
+    _phase_progress(5, total_phases, "Resolve")
     unresolved = found - set(pre_resolved.keys())
-    print(f"\n[*] Resolving {len(unresolved)} unique subdomains "
-          f"({len(pre_resolved)} already resolved via brute-force) ...")
+    print(f"[RESOLVE] Pending hosts: {len(unresolved)} | Pre-resolved from brute-force: {len(pre_resolved)}")
+    print("[RESOLVE] Performing DNS A/AAAA resolution for discovered hostnames...")
     resolved = {**pre_resolved, **resolve_all(unresolved, threads=args.threads)}
 
     live = sorted(resolved.items())
-    print(f"\n[+] {len(live)} live subdomains found for {domain}")
+    print(f"[RESOLVE] Live hosts confirmed: {len(live)}")
 
     if args.output:
         with open(args.output, "w") as f:
@@ -1195,7 +1251,9 @@ def main():
         enrich_limit = enrich_limit or 100
 
     # Enrich hosts (IP info always; optional HTTP probe + SSL + rDNS)
-    print("\n[*] Enriching subdomains (HTTP/HTTPS probe, IP info, SSL, rDNS) ...")
+    _phase_progress(6, total_phases, "Enrich")
+    print("[ENRICH] Enriching hosts with IP metadata and service intelligence...")
+    print(f"[ENRICH] Options: http={do_http} ssl={do_ssl} rdns={do_rdns} limit={enrich_limit or 'all'}")
     enriched = collect_enrichment(
         resolved,
         threads=args.threads,
@@ -1210,17 +1268,14 @@ def main():
     # A records report (terminal)
     print_a_records(resolved, enriched)
 
-    # Collect DNS records (MX / NS / TXT / SOA) with enrichment
-    print("[*] Collecting DNS records ...")
-    dns_data = collect_dns_records(domain)
-
-    # DNS report (terminal)
+    # DNS report (terminal) - already collected in DNS phase
     print_dns_report(dns_data)
 
     # Output reports
     stem = domain.replace(".", "_")
     generate_csv(resolved, enriched, f"{stem}_report.csv")
     generate_html(domain, resolved, enriched, dns_data, f"{stem}_report.html")
+    print(f"\n[COMPLETE] {_progress_bar(100)} 100%  | Recon workflow finished for {domain}")
 
 
 if __name__ == "__main__":
