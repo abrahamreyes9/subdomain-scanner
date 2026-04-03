@@ -9,10 +9,10 @@ import socket
 import argparse
 import threading
 import requests
-import json
 import re
 import ssl
 import dns.resolver
+import dns.reversename
 import dns.zone
 import dns.query
 import dns.exception
@@ -26,28 +26,39 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 _verbose: bool = False
 _custom_nameservers: list[str] = []
-_verify_ssl: bool = False          # False by default — scanners hit self-signed certs
+_verify_ssl: bool = True           # Default True — use --insecure to disable
 MAX_WORKERS: int = 100             # Default concurrency for brute-force / resolve
+_thread_local = threading.local()  # Thread-local resolver cache
 
 
 def configure(nameservers: list[str] | None = None,
               verbose: bool = False,
-              verify_ssl: bool = False) -> None:
+              verify_ssl: bool = True) -> None:
     """Set module-wide DNS resolver, verbosity, and SSL verification."""
     global _verbose, _custom_nameservers, _verify_ssl
     _verbose = verbose
     _custom_nameservers = nameservers or []
     _verify_ssl = verify_ssl
+    # Invalidate any cached thread-local resolvers so they pick up new nameservers
+    _thread_local.__dict__.clear()
 
 
 def _make_resolver(timeout: float = 5.0) -> dns.resolver.Resolver:
-    """Return a Resolver pre-configured with any custom nameservers."""
+    """Create a new Resolver configured with any custom nameservers."""
     r = dns.resolver.Resolver()
     r.timeout = timeout
     r.lifetime = timeout
     if _custom_nameservers:
         r.nameservers = _custom_nameservers
     return r
+
+
+def _get_resolver(timeout: float = 5.0) -> dns.resolver.Resolver:
+    """Return a thread-local Resolver, creating it on first use per thread."""
+    key = f"resolver_{timeout}"
+    if not hasattr(_thread_local, key):
+        setattr(_thread_local, key, _make_resolver(timeout))
+    return getattr(_thread_local, key)
 
 
 def _vprint(*args, **kwargs) -> None:
@@ -79,7 +90,7 @@ def rate_limited(max_per_second: float):
 def get_nameservers(domain: str) -> list[str]:
     """Return the authoritative nameservers for a domain."""
     try:
-        answers = _make_resolver().resolve(domain, "NS")
+        answers = _get_resolver().resolve(domain, "NS")
         return [str(r.target).rstrip(".") for r in answers]
     except Exception:
         return []
@@ -114,7 +125,7 @@ def dns_records(domain: str) -> set[str]:
       NS, MX, TXT (SPF includes), SRV common services.
     """
     found = set()
-    resolver = _make_resolver()
+    resolver = _get_resolver()
 
     # NS records — nameservers are often subdomains
     try:
@@ -177,6 +188,7 @@ def dns_records(domain: str) -> set[str]:
 
 # ── passive sources ────────────────────────────────────────────────────────────
 
+@rate_limited(2.0)
 def fetch_crtsh(domain: str) -> set[str]:
     """Query crt.sh certificate transparency logs."""
     url = f"https://crt.sh/?q=%.{domain}&output=json"
@@ -196,6 +208,7 @@ def fetch_crtsh(domain: str) -> set[str]:
         return set()
 
 
+@rate_limited(2.0)
 def fetch_hackertarget(domain: str) -> set[str]:
     """Query HackerTarget's free subdomain API."""
     url = f"https://api.hackertarget.com/hostsearch/?q={domain}"
@@ -361,7 +374,7 @@ COMMON_SUBDOMAINS = [
 def resolve(subdomain: str) -> tuple[str, str] | None:
     """Resolve a hostname to its A record using the configured resolver."""
     try:
-        answer = _make_resolver(timeout=3.0).resolve(subdomain, "A")
+        answer = _get_resolver(timeout=3.0).resolve(subdomain, "A")
         return (subdomain, str(answer[0]))
     except Exception:
         return None
@@ -380,8 +393,8 @@ def brute_force(domain: str, wordlist: list[str], threads: int = MAX_WORKERS) ->
                     host, ip = result
                     found.add(host)
                     _vprint(f"  [+] {host:<48} {ip}")
-            except Exception:
-                pass
+            except Exception as e:
+                _vprint("[!] thread error:", e)
     return found
 
 
@@ -421,7 +434,8 @@ def resolve_ip(hostname: str) -> str:
 
 def reverse_dns(ip: str) -> str:
     try:
-        return socket.gethostbyaddr(ip)[0]
+        rev = dns.reversename.from_address(ip)
+        return str(_get_resolver(timeout=3.0).resolve(rev, "PTR")[0]).rstrip(".")
     except Exception:
         return ""
 
@@ -625,7 +639,7 @@ def check_ports(ip: str, timeout: float = 1.5) -> list[int]:
 def check_takeover(host: str) -> dict | None:
     """Check if a subdomain CNAME points to an unclaimed service."""
     try:
-        resolver = _make_resolver(timeout=3)
+        resolver = _get_resolver(timeout=3)
         try:
             answers = resolver.resolve(host, "CNAME")
             cname   = str(answers[0].target).rstrip(".").lower()
@@ -750,9 +764,12 @@ def _enrich_batch(batch: list[tuple[str, str]], threads: int) -> dict[str, dict]
 
 
 def collect_enrichment(resolved: dict[str, str], threads: int = 50,
-                       batch_size: int = 50) -> dict[str, dict]:
+                       batch_size: int | None = None) -> dict[str, dict]:
     """Enrich resolved hosts in batches to avoid resource exhaustion."""
     items = sorted(resolved.items())
+    # Auto-tune batch size: ~10% of total hosts, clamped between 20 and 100
+    if batch_size is None:
+        batch_size = max(20, min(100, len(items) // 10 or 20))
     enriched: dict[str, dict] = {}
     for i in range(0, len(items), batch_size):
         batch = items[i:i + batch_size]
@@ -813,7 +830,7 @@ def print_a_records(resolved: dict[str, str], enriched: dict[str, dict]) -> None
 
 def collect_dns_records(domain: str) -> dict:
     """Collect MX, NS, TXT, SOA records and enrich with IP info."""
-    resolver = _make_resolver()
+    resolver = _get_resolver()
     data = {"mx": [], "ns": [], "txt": [], "soa": None}
 
     # MX
@@ -1119,8 +1136,8 @@ def resolve_all(subdomains: set[str], threads: int = MAX_WORKERS) -> dict[str, s
                     host, ip = result
                     resolved[host] = ip
                     _vprint(f"  [+] {host:<48} {ip}")
-            except Exception:
-                pass
+            except Exception as e:
+                _vprint("[!] thread error:", e)
     return resolved
 
 
@@ -1138,9 +1155,12 @@ def main():
                         help="Custom DNS resolvers, e.g. --dns 1.1.1.1 8.8.8.8")
     parser.add_argument("--verbose", action="store_true",
                         help="Print each resolved subdomain as it is found")
+    parser.add_argument("--insecure", action="store_false", dest="verify_ssl",
+                        help="Disable TLS certificate verification")
+    parser.set_defaults(verify_ssl=True)
     args = parser.parse_args()
 
-    configure(nameservers=args.dns, verbose=args.verbose)
+    configure(nameservers=args.dns, verbose=args.verbose, verify_ssl=args.verify_ssl)
     domain = args.domain.lower().strip()
     print(f"\n[*] Target: {domain}\n")
 
@@ -1228,4 +1248,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+        sys.exit(0)
+    except KeyboardInterrupt:
+        print("\n[!] Interrupted by user")
+        sys.exit(130)
