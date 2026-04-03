@@ -1009,59 +1009,255 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
 <title>Subdomain Report – {_h(domain)}</title>
 <style>
   :root {{
-    --bg: #050a05; --surface: #0b140b; --border: #1f3a1f;
-    --text: #b7ffbf; --dim: #6faa72; --accent: #39ff14;
-    --green: #39ff14; --amber: #b6ff00; --red: #ff4d6d;
-    --asn-bg: #102110; --tag-bg: #0f2412; --tag-fg: #8dff9a;
+    --bg: #050a05;
+    --surface: #0b140b;
+    --border: #1a3a1a;
+    --text: #a8f0a8;
+    --dim: #4e8a50;
+    --accent: #00ff41;
+    --green: #00ff41;
+    --amber: #adff2f;
+    --red: #ff2040;
+    --hover-row: rgba(0, 255, 65, 0.06);
+    --asn-bg: #0a1f0a;
+    --tag-bg: #0c2010;
+    --tag-fg: #7fff8a;
+    --glow: rgba(0, 255, 65, 0.35);
+    --glow-sm: rgba(0, 255, 65, 0.15);
+    --scrollbar-thumb: #1a3a1a;
+    --scrollbar-track: #050a05;
   }}
+
   body.light {{
-    --bg: #f4fff4; --surface: #ffffff; --border: #cce7cc;
-    --text: #103010; --dim: #3f6b3f; --accent: #0f7a2a;
-    --green: #0f7a2a; --amber: #6b8e00; --red: #b42318;
-    --asn-bg: #dff5df; --tag-bg: #e9fbe9; --tag-fg: #1f6f2f;
+    --bg: #0e1a0e;
+    --surface: #132013;
+    --border: #1f3f1f;
+    --text: #c0ffc0;
+    --dim: #5ea05e;
+    --accent: #00ff41;
+    --green: #00ff41;
+    --amber: #adff2f;
+    --red: #ff4060;
+    --hover-row: rgba(0, 255, 65, 0.08);
+    --asn-bg: #0f280f;
+    --tag-bg: #122a12;
+    --tag-fg: #90ff9a;
+    --glow: rgba(0, 255, 65, 0.3);
+    --glow-sm: rgba(0, 255, 65, 0.12);
+    --scrollbar-thumb: #2a4f2a;
+    --scrollbar-track: #0e1a0e;
   }}
+
+  ::selection {{
+    background: var(--accent);
+    color: #000;
+  }}
+
+  ::-webkit-scrollbar {{
+    width: 8px;
+    height: 8px;
+  }}
+  ::-webkit-scrollbar-track {{
+    background: var(--scrollbar-track);
+  }}
+  ::-webkit-scrollbar-thumb {{
+    background: var(--scrollbar-thumb);
+    border-radius: 4px;
+  }}
+  ::-webkit-scrollbar-thumb:hover {{
+    background: var(--accent);
+  }}
+
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; font-size: 14px; padding: 24px; }}
-  h1 {{ font-size: 1.5rem; margin-bottom: 4px; color: var(--accent); letter-spacing: .04em; text-shadow: 0 0 8px rgba(57,255,20,.28); }}
-  .meta {{ color: var(--dim); font-size: 12px; margin-bottom: 32px; }}
-  .header-row {{ display: block; margin-bottom: 4px; }}
-  .theme-toggle {{ position: fixed; top: 14px; right: 14px; z-index: 1000;
-                   background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
-                   padding: 5px 12px; font-size: 12px; color: var(--dim); cursor: pointer; }}
-  .theme-toggle:hover {{ color: var(--text); border-color: var(--accent); box-shadow: 0 0 10px rgba(57,255,20,.2); }}
+
+  body {{
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Courier New', 'Fira Code', monospace;
+    font-size: 14px;
+    padding: 24px;
+  }}
+
+  h1 {{
+    font-size: 1.5rem;
+    margin-bottom: 4px;
+    color: var(--accent);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    text-shadow: 0 0 10px var(--glow), 0 0 30px var(--glow-sm);
+  }}
+
+  .meta {{
+    color: var(--dim);
+    font-size: 12px;
+    margin-bottom: 32px;
+  }}
+
+  .header-row {{
+    display: block;
+    margin-bottom: 4px;
+  }}
+
+  .theme-toggle {{
+    position: fixed;
+    top: 14px;
+    right: 14px;
+    z-index: 1000;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-family: 'Courier New', monospace;
+    color: var(--dim);
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }}
+  .theme-toggle:hover {{
+    color: var(--accent);
+    border-color: var(--accent);
+    box-shadow: 0 0 12px var(--glow-sm);
+  }}
+
   @media (max-width: 640px) {{
     .theme-toggle {{ top: 10px; right: 10px; }}
   }}
-  .stat-bar {{ display: flex; gap: 16px; margin-bottom: 32px; flex-wrap: wrap; }}
-  .stat {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-           padding: 12px 20px; min-width: 120px; }}
-  .stat .num {{ font-size: 1.8rem; font-weight: 700; color: var(--accent); text-shadow: 0 0 8px rgba(57,255,20,.25); }}
-  .stat .lbl {{ color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }}
+
+  .stat-bar {{
+    display: flex;
+    gap: 16px;
+    margin-bottom: 32px;
+    flex-wrap: wrap;
+  }}
+  .stat {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 20px;
+    min-width: 120px;
+  }}
+  .stat .num {{
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--accent);
+    text-shadow: 0 0 10px var(--glow), 0 0 40px var(--glow-sm);
+  }}
+  .stat .lbl {{
+    color: var(--dim);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+  }}
+
   section {{ margin-bottom: 40px; }}
-  h2 {{ font-size: 1rem; font-weight: 600; color: var(--accent); border-bottom: 1px solid var(--border);
-        padding-bottom: 8px; margin-bottom: 16px; text-transform: uppercase; letter-spacing: .05em; }}
-  .table-wrap {{ overflow-x: auto; border-radius: 8px; border: 1px solid var(--border); }}
+
+  h2 {{
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--accent);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+    margin-bottom: 16px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    text-shadow: 0 0 6px var(--glow-sm);
+  }}
+
+  .table-wrap {{
+    overflow-x: auto;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }}
   table {{ width: 100%; border-collapse: collapse; }}
-  thead th {{ background: var(--surface); color: var(--dim); font-size: 11px; text-transform: uppercase;
-              letter-spacing: .05em; padding: 10px 14px; text-align: left; white-space: nowrap; }}
-  tbody tr {{ border-top: 1px solid var(--border); }}
-  tbody tr:hover {{ background: #102010; }}
-  td {{ padding: 10px 14px; vertical-align: top; word-break: break-word; max-width: 320px; }}
-  td a {{ color: var(--accent); text-decoration: none; font-weight: 600; }}
-  td a:hover {{ text-decoration: underline; }}
-  .mono {{ font-family: monospace; font-size: 12px; }}
-  .dim {{ color: var(--dim); }}
-  .asn {{ background: var(--asn-bg); color: var(--amber); font-family: monospace; font-size: 11px;
-          padding: 1px 6px; border-radius: 4px; white-space: nowrap; }}
-  .tag {{ display: inline-block; background: var(--tag-bg); color: var(--tag-fg); font-size: 11px;
-          padding: 1px 6px; border-radius: 4px; margin-top: 2px; }}
-  .txt-record {{ background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
-                 padding: 10px 14px; margin-bottom: 8px; font-family: monospace; font-size: 12px;
-                 word-break: break-all; white-space: pre-wrap; color: var(--green); }}
-  .soa-table th {{ background: var(--surface); padding: 8px 14px; text-align: left;
-                   color: var(--dim); width: 140px; font-weight: normal; }}
-  .soa-table td {{ padding: 8px 14px; font-family: monospace; }}
-  .soa-table tr {{ border-top: 1px solid var(--border); }}
+
+  thead th {{
+    background: var(--surface);
+    color: var(--dim);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    padding: 10px 14px;
+    text-align: left;
+    white-space: nowrap;
+  }}
+
+  tbody tr {{
+    border-top: 1px solid var(--border);
+    transition: background 0.15s ease;
+  }}
+  tbody tr:hover {{
+    background: var(--hover-row);
+  }}
+
+  td {{
+    padding: 10px 14px;
+    vertical-align: top;
+    word-break: break-word;
+    max-width: 320px;
+  }}
+  td a {{
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 600;
+    text-shadow: 0 0 4px var(--glow-sm);
+  }}
+  td a:hover {{
+    text-decoration: underline;
+    text-shadow: 0 0 8px var(--glow);
+  }}
+
+  .mono {{ font-family: 'Courier New', monospace; font-size: 12px; }}
+  .dim  {{ color: var(--dim); }}
+
+  .asn {{
+    background: var(--asn-bg);
+    color: var(--amber);
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+  }}
+
+  .tag {{
+    display: inline-block;
+    background: var(--tag-bg);
+    color: var(--tag-fg);
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-top: 2px;
+  }}
+
+  .txt-record {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    word-break: break-all;
+    white-space: pre-wrap;
+    color: var(--green);
+    text-shadow: 0 0 3px var(--glow-sm);
+  }}
+
+  .soa-table th {{
+    background: var(--surface);
+    padding: 8px 14px;
+    text-align: left;
+    color: var(--dim);
+    width: 140px;
+    font-weight: normal;
+  }}
+  .soa-table td {{
+    padding: 8px 14px;
+    font-family: 'Courier New', monospace;
+  }}
+  .soa-table tr {{
+    border-top: 1px solid var(--border);
+  }}
 </style>
 <script>
   (function() {{
