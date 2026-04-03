@@ -12,9 +12,11 @@ import csv
 import re
 import ssl
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from functools import lru_cache
 
 import requests
 import dns.resolver
@@ -22,17 +24,51 @@ import dns.zone
 import dns.query
 import dns.exception
 import urllib3
-import whois as whois_lib
+
+try:
+    import whois as whois_lib
+    WHOIS_AVAILABLE = True
+except ImportError:
+    WHOIS_AVAILABLE = False
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ── shared HTTP session with connection pooling ──────────────────────────────
 _http_session = requests.Session()
 _http_adapter = requests.adapters.HTTPAdapter(
-    pool_connections=100, pool_maxsize=100, max_retries=0,
+    pool_connections=200, pool_maxsize=200, max_retries=1,
 )
 _http_session.mount("http://", _http_adapter)
 _http_session.mount("https://", _http_adapter)
 _http_session.max_redirects = 3
+
+# ── thread-local DNS resolver + cached lookups ───────────────────────────────
+_thread_local = threading.local()
+
+
+def _get_resolver() -> dns.resolver.Resolver:
+    if not hasattr(_thread_local, "resolver"):
+        r = dns.resolver.Resolver()
+        r.timeout = 3
+        r.lifetime = 3
+        _thread_local.resolver = r
+    return _thread_local.resolver
+
+
+@lru_cache(maxsize=10000)
+def fast_resolve(hostname: str) -> str | None:
+    try:
+        answers = _get_resolver().resolve(hostname, "A")
+        return str(answers[0])
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=10000)
+def fast_reverse_dns(ip: str) -> str:
+    try:
+        return socket.gethostbyaddr(ip)[0]
+    except Exception:
+        return ""
 
 
 def signal_handler(sig, frame):
@@ -47,7 +83,7 @@ signal.signal(signal.SIGINT, signal_handler)
 def get_nameservers(domain: str) -> list[str]:
     """Return the authoritative nameservers for a domain."""
     try:
-        answers = dns.resolver.resolve(domain, "NS")
+        answers = _get_resolver().resolve(domain, "NS")
         return [str(r.target).rstrip(".") for r in answers]
     except Exception:
         return []
@@ -58,7 +94,9 @@ def attempt_zone_transfer(domain: str, nameservers: list[str]) -> set[str]:
     found = set()
     for ns in nameservers:
         try:
-            ns_ip = socket.gethostbyname(ns)
+            ns_ip = fast_resolve(ns)
+            if not ns_ip:
+                continue
             z = dns.zone.from_xfr(dns.query.xfr(ns_ip, domain, timeout=10))
             for name in z.nodes.keys():
                 host = str(name)
@@ -82,9 +120,7 @@ def dns_records(domain: str) -> set[str]:
       NS, MX, TXT (SPF includes), SRV common services.
     """
     found = set()
-    resolver = dns.resolver.Resolver()
-    resolver.timeout = 5
-    resolver.lifetime = 5
+    resolver = _get_resolver()
 
     # NS records — nameservers are often subdomains
     try:
@@ -194,6 +230,8 @@ def fetch_hackertarget(domain: str, timeout: float = 12.0) -> set[str]:
 
 def fetch_whois(domain: str) -> dict:
     """Return WHOIS data for a domain as a plain dict."""
+    if not WHOIS_AVAILABLE:
+        return {}
     try:
         w = whois_lib.whois(domain)
         def _first(val):
@@ -355,11 +393,8 @@ COMMON_SUBDOMAINS = [
 
 def resolve(subdomain: str) -> tuple[str, str] | None:
     """Try to resolve a hostname; return (hostname, ip) or None."""
-    try:
-        ip = socket.gethostbyname(subdomain)
-        return (subdomain, ip)
-    except (socket.gaierror, socket.timeout):
-        return None
+    ip = fast_resolve(subdomain)
+    return (subdomain, ip) if ip else None
 
 
 def brute_force(domain: str, wordlist: list[str], threads: int = 100) -> dict[str, str]:
@@ -379,18 +414,14 @@ def brute_force(domain: str, wordlist: list[str], threads: int = 100) -> dict[st
 
 # ── IP enrichment ─────────────────────────────────────────────────────────────
 
-_ip_cache: dict[str, dict] = {}
-
+@lru_cache(maxsize=5000)
 def get_ip_info(ip: str) -> dict:
     """Query ipinfo.io for ASN, CIDR, org, country."""
     if not ip or ip in ("?", ""):
         return {}
-    if ip in _ip_cache:
-        return _ip_cache[ip]
     try:
         r = _http_session.get(f"https://ipinfo.io/{ip}/json", timeout=8)
         data = r.json()
-        _ip_cache[ip] = data
         return data
     except Exception:
         return {}
@@ -407,17 +438,11 @@ def check_ssh(ip: str, timeout: float = 1.5) -> str:
 
 
 def resolve_ip(hostname: str) -> str:
-    try:
-        return socket.gethostbyname(hostname)
-    except Exception:
-        return ""
+    return fast_resolve(hostname) or ""
 
 
 def reverse_dns(ip: str) -> str:
-    try:
-        return socket.gethostbyaddr(ip)[0]
-    except Exception:
-        return ""
+    return fast_reverse_dns(ip)
 
 
 # ── DNSDumpster-style report ───────────────────────────────────────────────────
@@ -813,9 +838,7 @@ def _collect_txt_soa_records(domain: str, resolver: dns.resolver.Resolver) -> tu
 
 def collect_dns_records(domain: str) -> dict:
     """Collect MX, NS, TXT, SOA records and enrich with IP info."""
-    resolver = dns.resolver.Resolver()
-    resolver.timeout = 5
-    resolver.lifetime = 5
+    resolver = _get_resolver()
 
     txt_data, soa_data = _collect_txt_soa_records(domain, resolver)
     return {
@@ -1138,6 +1161,7 @@ def main():
     parser.add_argument("--no-http-probe", action="store_true", help="Skip HTTP/HTTPS probing")
     parser.add_argument("--no-ssl", action="store_true", help="Skip SSL certificate lookup")
     parser.add_argument("--no-rdns", action="store_true", help="Skip reverse DNS lookups")
+    parser.add_argument("--no-whois", action="store_true", help="Skip WHOIS query")
     parser.add_argument("--quick", action="store_true", help="Faster scan with lighter enrichment defaults")
     parser.add_argument("--wordlist", help="Path to custom wordlist (one word per line)")
     parser.add_argument("--threads", type=int, default=100, help="Concurrent threads (default 100)")
@@ -1163,9 +1187,14 @@ def main():
 
     # WHOIS
     _phase_progress(1, total_phases, "WHOIS")
-    print("[WHOIS] Querying registrar and registration metadata...")
-    whois_data = fetch_whois(domain)
-    _print_whois_summary(whois_data)
+    if args.no_whois:
+        print("[WHOIS] Skipped by operator flag (--no-whois).")
+    elif not WHOIS_AVAILABLE:
+        print("[WHOIS] Skipped (python-whois not installed).")
+    else:
+        print("[WHOIS] Querying registrar and registration metadata...")
+        whois_data = fetch_whois(domain)
+        _print_whois_summary(whois_data)
 
     # DNS (enumeration + record collection)
     _phase_progress(2, total_phases, "DNS (Discovery + Records)")
