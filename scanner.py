@@ -9,7 +9,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from subdomain_enum import (
     fetch_crtsh,
     fetch_hackertarget,
-    fetch_amass,
     get_nameservers,
     attempt_zone_transfer,
     dns_records as extract_dns_subdomains,
@@ -54,17 +53,15 @@ def run_scan(domain: str, q: queue.Queue) -> None:
         # ── Phase 2: Passive sources ──────────────────────────────────────────
         emit({"type": "phase", "phase": "passive", "message": "Querying passive sources..."})
 
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            f_crt   = ex.submit(fetch_crtsh, domain)
-            f_ht    = ex.submit(fetch_hackertarget, domain)
-            f_amass = ex.submit(fetch_amass, domain)
-            crt     = f_crt.result()
-            ht      = f_ht.result()
-            amass   = f_amass.result()
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_crt = ex.submit(fetch_crtsh, domain)
+            f_ht  = ex.submit(fetch_hackertarget, domain)
+            crt   = f_crt.result()
+            ht    = f_ht.result()
 
-        found |= crt | ht | amass
+        found |= crt | ht
         emit({"type": "status",
-              "message": f"crt.sh: {len(crt)}  HackerTarget: {len(ht)}  amass: {len(amass)}"})
+              "message": f"crt.sh: {len(crt)}  HackerTarget: {len(ht)}"})
 
         # ── Phase 3: Brute-force ──────────────────────────────────────────────
         emit({"type": "phase", "phase": "brute",
