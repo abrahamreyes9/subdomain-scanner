@@ -7,6 +7,7 @@ Sources: DNS zone transfer, DNS records (NS/MX/TXT/SRV), crt.sh, HackerTarget, b
 import sys
 import socket
 import argparse
+import threading
 import requests
 import json
 import re
@@ -16,6 +17,8 @@ import dns.zone
 import dns.query
 import dns.exception
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import wraps
+from time import time
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -23,13 +26,18 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 _verbose: bool = False
 _custom_nameservers: list[str] = []
+_verify_ssl: bool = False          # False by default — scanners hit self-signed certs
+MAX_WORKERS: int = 100             # Default concurrency for brute-force / resolve
 
 
-def configure(nameservers: list[str] | None = None, verbose: bool = False) -> None:
-    """Set module-wide DNS resolver and verbosity. Call before scanning."""
-    global _verbose, _custom_nameservers
+def configure(nameservers: list[str] | None = None,
+              verbose: bool = False,
+              verify_ssl: bool = False) -> None:
+    """Set module-wide DNS resolver, verbosity, and SSL verification."""
+    global _verbose, _custom_nameservers, _verify_ssl
     _verbose = verbose
     _custom_nameservers = nameservers or []
+    _verify_ssl = verify_ssl
 
 
 def _make_resolver(timeout: float = 5.0) -> dns.resolver.Resolver:
@@ -45,6 +53,25 @@ def _make_resolver(timeout: float = 5.0) -> dns.resolver.Resolver:
 def _vprint(*args, **kwargs) -> None:
     if _verbose:
         print(*args, **kwargs)
+
+
+def rate_limited(max_per_second: float):
+    """Thread-safe decorator that caps how often a function may be called."""
+    min_interval = 1.0 / max_per_second
+    def decorate(func):
+        last_called = [0.0]
+        lock = threading.Lock()
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            with lock:
+                elapsed = time() - last_called[0]
+                wait = min_interval - elapsed
+                if wait > 0:
+                    import time as _t; _t.sleep(wait)
+                last_called[0] = time()
+            return func(*args, **kwargs)
+        return wrapper
+    return decorate
 
 
 # ── DNS enumeration ───────────────────────────────────────────────────────────
@@ -63,7 +90,9 @@ def attempt_zone_transfer(domain: str, nameservers: list[str]) -> set[str]:
     found = set()
     for ns in nameservers:
         try:
-            ns_ip = socket.gethostbyname(ns)
+            ns_ip = resolve_ip(ns)
+            if not ns_ip:
+                continue
             z = dns.zone.from_xfr(dns.query.xfr(ns_ip, domain, timeout=10))
             for name in z.nodes.keys():
                 host = str(name)
@@ -330,26 +359,29 @@ COMMON_SUBDOMAINS = [
 
 
 def resolve(subdomain: str) -> tuple[str, str] | None:
-    """Try to resolve a hostname; return (hostname, ip) or None."""
+    """Resolve a hostname to its A record using the configured resolver."""
     try:
-        ip = socket.gethostbyname(subdomain)
-        return (subdomain, ip)
-    except (socket.gaierror, socket.timeout):
+        answer = _make_resolver(timeout=3.0).resolve(subdomain, "A")
+        return (subdomain, str(answer[0]))
+    except Exception:
         return None
 
 
-def brute_force(domain: str, wordlist: list[str], threads: int = 100) -> set[str]:
+def brute_force(domain: str, wordlist: list[str], threads: int = MAX_WORKERS) -> set[str]:
     """Resolve candidates concurrently, printing hits as they arrive."""
     candidates = [f"{w}.{domain}" for w in wordlist]
     found = set()
     with ThreadPoolExecutor(max_workers=threads) as ex:
         futures = {ex.submit(resolve, c): c for c in candidates}
         for f in as_completed(futures):
-            result = f.result()
-            if result:
-                host, ip = result
-                found.add(host)
-                _vprint(f"  [+] {host:<48} {ip}")
+            try:
+                result = f.result()
+                if result:
+                    host, ip = result
+                    found.add(host)
+                    _vprint(f"  [+] {host:<48} {ip}")
+            except Exception:
+                pass
     return found
 
 
@@ -357,6 +389,7 @@ def brute_force(domain: str, wordlist: list[str], threads: int = 100) -> set[str
 
 _ip_cache: dict[str, dict] = {}
 
+@rate_limited(5.0)  # ipinfo.io free tier: ~50k req/mo, stay polite
 def get_ip_info(ip: str) -> dict:
     """Query ipinfo.io for ASN, CIDR, org, country."""
     if ip in _ip_cache or ip in ("?", ""):
@@ -381,10 +414,9 @@ def check_ssh(ip: str, timeout: float = 1.5) -> str:
 
 
 def resolve_ip(hostname: str) -> str:
-    try:
-        return socket.gethostbyname(hostname)
-    except Exception:
-        return ""
+    """Resolve hostname to IPv4 using the configured resolver."""
+    result = resolve(hostname)
+    return result[1] if result else ""
 
 
 def reverse_dns(ip: str) -> str:
@@ -607,7 +639,7 @@ def check_takeover(host: str) -> dict | None:
         fingerprints = TAKEOVER_FINGERPRINTS[matched]
         for scheme in ("https", "http"):
             try:
-                r    = requests.get(f"{scheme}://{host}", timeout=5, verify=False,
+                r    = requests.get(f"{scheme}://{host}", timeout=5, verify=_verify_ssl,
                                     allow_redirects=True)
                 body = r.text[:8000].lower()
                 hit  = next((fp for fp in fingerprints if fp.lower() in body), None)
@@ -628,7 +660,7 @@ def _probe_one(session: requests.Session, scheme: str, port: int,
     url   = f"{scheme}://{host}" if port in (80, 443) else f"{scheme}://{host}:{port}"
     hdrs  = {"User-Agent": "Mozilla/5.0"}
     try:
-        r      = session.get(url, timeout=timeout, headers=hdrs, verify=False,
+        r      = session.get(url, timeout=timeout, headers=hdrs, verify=_verify_ssl,
                              allow_redirects=True)
         server = r.headers.get("server", "unknown server")
         title  = _get_title(r.text)
@@ -690,33 +722,41 @@ def get_ssl_cert_info(host: str, timeout: float = 5.0) -> dict:
         return {}
 
 
-def collect_enrichment(resolved: dict[str, str], threads: int = 100) -> dict[str, dict]:
-    """Enrich all resolved hosts using a single flat thread pool.
-
-    All sub-tasks (IP info, HTTP probe, SSL cert, rDNS) for every host are
-    submitted directly — no nested executors, no per-host pool spin-up.
-    """
-    items = sorted(resolved.items())
-    enriched: dict[str, dict] = {host: {"ip": ip} for host, ip in items}
-
+def _enrich_batch(batch: list[tuple[str, str]], threads: int) -> dict[str, dict]:
+    """Enrich a single batch of (host, ip) pairs."""
+    enriched = {}
     with ThreadPoolExecutor(max_workers=threads) as ex:
-        f_info     = {host: ex.submit(get_ip_info,      ip)   for host, ip in items}
-        f_http     = {host: ex.submit(probe_http,        host) for host, _ in items}
-        f_ssl      = {host: ex.submit(get_ssl_cert_info, host) for host, _ in items}
-        f_rdns     = {host: ex.submit(reverse_dns,       ip)   for host, ip in items}
-        f_ports    = {host: ex.submit(check_ports,       ip)   for host, ip in items}
-        f_takeover = {host: ex.submit(check_takeover,    host) for host, _ in items}
+        f_info     = {host: ex.submit(get_ip_info,      ip)   for host, ip in batch}
+        f_http     = {host: ex.submit(probe_http,        host) for host, _ in batch}
+        f_ssl      = {host: ex.submit(get_ssl_cert_info, host) for host, _ in batch}
+        f_rdns     = {host: ex.submit(reverse_dns,       ip)   for host, ip in batch}
+        f_ports    = {host: ex.submit(check_ports,       ip)   for host, ip in batch}
+        f_takeover = {host: ex.submit(check_takeover,    host) for host, _ in batch}
+    for host, ip in batch:
+        try:
+            enriched[host] = {
+                "ip":       ip,
+                "info":     f_info[host].result(),
+                "http":     f_http[host].result(),
+                "ssl":      f_ssl[host].result(),
+                "rdns":     f_rdns[host].result(),
+                "ports":    f_ports[host].result(),
+                "takeover": f_takeover[host].result(),
+            }
+        except Exception:
+            enriched[host] = {"ip": ip, "info": {}, "http": {}, "ssl": {},
+                               "rdns": "", "ports": [], "takeover": None}
+    return enriched
 
-    for host, ip in items:
-        enriched[host] = {
-            "ip":       ip,
-            "info":     f_info[host].result(),
-            "http":     f_http[host].result(),
-            "ssl":      f_ssl[host].result(),
-            "rdns":     f_rdns[host].result(),
-            "ports":    f_ports[host].result(),
-            "takeover": f_takeover[host].result(),
-        }
+
+def collect_enrichment(resolved: dict[str, str], threads: int = 50,
+                       batch_size: int = 50) -> dict[str, dict]:
+    """Enrich resolved hosts in batches to avoid resource exhaustion."""
+    items = sorted(resolved.items())
+    enriched: dict[str, dict] = {}
+    for i in range(0, len(items), batch_size):
+        batch = items[i:i + batch_size]
+        enriched.update(_enrich_batch(batch, threads=min(threads, len(batch) * 6)))
     return enriched
 
 
@@ -1067,17 +1107,20 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
 
 # ── DNS resolution / validation ────────────────────────────────────────────────
 
-def resolve_all(subdomains: set[str], threads: int = 100) -> dict[str, str]:
+def resolve_all(subdomains: set[str], threads: int = MAX_WORKERS) -> dict[str, str]:
     """Resolve subdomains concurrently, printing each hit as it arrives."""
     resolved = {}
     with ThreadPoolExecutor(max_workers=threads) as ex:
         futures = {ex.submit(resolve, s): s for s in subdomains}
         for f in as_completed(futures):
-            result = f.result()
-            if result:
-                host, ip = result
-                resolved[host] = ip
-                _vprint(f"  [+] {host:<48} {ip}")
+            try:
+                result = f.result()
+                if result:
+                    host, ip = result
+                    resolved[host] = ip
+                    _vprint(f"  [+] {host:<48} {ip}")
+            except Exception:
+                pass
     return resolved
 
 
