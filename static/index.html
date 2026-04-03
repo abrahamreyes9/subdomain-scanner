@@ -279,6 +279,10 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Download HTML
         </button>
+        <button class="btn btn-dl btn-dl-secondary" onclick="downloadASM()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Export for ASM (Qualys / Tenable / Rapid7)
+        </button>
       </div>
     </div>
   </div>
@@ -648,6 +652,37 @@ function downloadTXT() {
 // ── Download HTML ──────────────────────────────────────────────────────────────
 function downloadHTML() {
   download(`${domain}_recon_report.html`, document.documentElement.outerHTML, 'text/html');
+}
+
+// ── Export for ASM tools (Qualys / Tenable / Rapid7) ──────────────────────────
+function downloadASM() {
+  const lines = [];
+  const now   = new Date().toLocaleString();
+
+  lines.push(`# Attack Surface Export — ${domain}`);
+  lines.push(`# Generated : ${now}`);
+  lines.push(`# Format    : IP | Domain`);
+  lines.push(`# Import into Qualys / Tenable / Rapid7 as asset list`);
+  lines.push('');
+  lines.push('IP | Domain');
+  lines.push('-'.repeat(60));
+
+  // Deduplicate by IP — one line per unique IP, list all domains that share it
+  const ipMap = {};
+  for (const host of Object.keys(enrichedData).sort()) {
+    const ip = enrichedData[host].ip;
+    if (!ip) continue;
+    if (!ipMap[ip]) ipMap[ip] = [];
+    ipMap[ip].push(host);
+  }
+
+  for (const ip of Object.keys(ipMap).sort()) {
+    for (const host of ipMap[ip]) {
+      lines.push(`${ip} | ${host}`);
+    }
+  }
+
+  download(`${domain}_asm_import.txt`, lines.join('\r\n'), 'text/plain');
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
