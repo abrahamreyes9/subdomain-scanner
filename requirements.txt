@@ -2,7 +2,7 @@ fastapi
 uvicorn
 pydantic
 requests
-httpx
+httpx[http2]
 dnspython
 aiodns
 ipwhois
