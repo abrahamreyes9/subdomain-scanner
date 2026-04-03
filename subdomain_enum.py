@@ -19,12 +19,40 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# ── Module-level configuration ────────────────────────────────────────────────
+
+_verbose: bool = False
+_custom_nameservers: list[str] = []
+
+
+def configure(nameservers: list[str] | None = None, verbose: bool = False) -> None:
+    """Set module-wide DNS resolver and verbosity. Call before scanning."""
+    global _verbose, _custom_nameservers
+    _verbose = verbose
+    _custom_nameservers = nameservers or []
+
+
+def _make_resolver(timeout: float = 5.0) -> dns.resolver.Resolver:
+    """Return a Resolver pre-configured with any custom nameservers."""
+    r = dns.resolver.Resolver()
+    r.timeout = timeout
+    r.lifetime = timeout
+    if _custom_nameservers:
+        r.nameservers = _custom_nameservers
+    return r
+
+
+def _vprint(*args, **kwargs) -> None:
+    if _verbose:
+        print(*args, **kwargs)
+
+
 # ── DNS enumeration ───────────────────────────────────────────────────────────
 
 def get_nameservers(domain: str) -> list[str]:
     """Return the authoritative nameservers for a domain."""
     try:
-        answers = dns.resolver.resolve(domain, "NS")
+        answers = _make_resolver().resolve(domain, "NS")
         return [str(r.target).rstrip(".") for r in answers]
     except Exception:
         return []
@@ -57,9 +85,7 @@ def dns_records(domain: str) -> set[str]:
       NS, MX, TXT (SPF includes), SRV common services.
     """
     found = set()
-    resolver = dns.resolver.Resolver()
-    resolver.timeout = 5
-    resolver.lifetime = 5
+    resolver = _make_resolver()
 
     # NS records — nameservers are often subdomains
     try:
@@ -303,7 +329,7 @@ def brute_force(domain: str, wordlist: list[str], threads: int = 100) -> set[str
             if result:
                 host, ip = result
                 found.add(host)
-                print(f"  [+] {host:<48} {ip}")
+                _vprint(f"  [+] {host:<48} {ip}")
     return found
 
 
@@ -547,9 +573,7 @@ def check_ports(ip: str, timeout: float = 1.5) -> list[int]:
 def check_takeover(host: str) -> dict | None:
     """Check if a subdomain CNAME points to an unclaimed service."""
     try:
-        resolver = dns.resolver.Resolver()
-        resolver.timeout = 3
-        resolver.lifetime = 3
+        resolver = _make_resolver(timeout=3)
         try:
             answers = resolver.resolve(host, "CNAME")
             cname   = str(answers[0].target).rstrip(".").lower()
@@ -729,9 +753,7 @@ def print_a_records(resolved: dict[str, str], enriched: dict[str, dict]) -> None
 
 def collect_dns_records(domain: str) -> dict:
     """Collect MX, NS, TXT, SOA records and enrich with IP info."""
-    resolver = dns.resolver.Resolver()
-    resolver.timeout = 5
-    resolver.lifetime = 5
+    resolver = _make_resolver()
     data = {"mx": [], "ns": [], "txt": [], "soa": None}
 
     # MX
@@ -1035,7 +1057,7 @@ def resolve_all(subdomains: set[str], threads: int = 100) -> dict[str, str]:
             if result:
                 host, ip = result
                 resolved[host] = ip
-                print(f"  [+] {host:<48} {ip}")
+                _vprint(f"  [+] {host:<48} {ip}")
     return resolved
 
 
@@ -1049,8 +1071,13 @@ def main():
     parser.add_argument("--wordlist", help="Path to custom wordlist (one word per line)")
     parser.add_argument("--threads", type=int, default=50, help="Concurrent threads (default 50)")
     parser.add_argument("--output", help="Save results to file")
+    parser.add_argument("--dns", metavar="NS", nargs="+",
+                        help="Custom DNS resolvers, e.g. --dns 1.1.1.1 8.8.8.8")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print each resolved subdomain as it is found")
     args = parser.parse_args()
 
+    configure(nameservers=args.dns, verbose=args.verbose)
     domain = args.domain.lower().strip()
     print(f"\n[*] Target: {domain}\n")
 
