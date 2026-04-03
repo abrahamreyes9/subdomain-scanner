@@ -1081,23 +1081,23 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
   }}
 
   body.light {{
-    --bg: #0e1a0e;
-    --surface: #132013;
-    --border: #1f3f1f;
-    --text: #c0ffc0;
-    --dim: #5ea05e;
-    --accent: #00ff41;
-    --green: #00ff41;
-    --amber: #adff2f;
-    --red: #ff4060;
-    --hover-row: rgba(0, 255, 65, 0.08);
-    --asn-bg: #0f280f;
-    --tag-bg: #122a12;
-    --tag-fg: #90ff9a;
-    --glow: rgba(0, 255, 65, 0.3);
-    --glow-sm: rgba(0, 255, 65, 0.12);
-    --scrollbar-thumb: #2a4f2a;
-    --scrollbar-track: #0e1a0e;
+    --bg: #f4fff4;
+    --surface: #ffffff;
+    --border: #cce7cc;
+    --text: #103010;
+    --dim: #3f6b3f;
+    --accent: #0f7a2a;
+    --green: #0f7a2a;
+    --amber: #6b8e00;
+    --red: #b42318;
+    --hover-row: rgba(15, 122, 42, 0.06);
+    --asn-bg: #dff5df;
+    --tag-bg: #e9fbe9;
+    --tag-fg: #1f6f2f;
+    --glow: rgba(15, 122, 42, 0.15);
+    --glow-sm: rgba(15, 122, 42, 0.08);
+    --scrollbar-thumb: #99cc99;
+    --scrollbar-track: #e8f5e8;
   }}
 
   ::selection {{
