@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subdomain Scanner</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --surface2: #222536;
+    --border: #2a2d3e; --text: #e2e8f0; --dim: #6b7280;
+    --accent: #6366f1; --green: #10b981; --amber: #f59e0b;
+    --red: #ef4444; --blue: #38bdf8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif;
+         font-size: 14px; min-height: 100vh; }
+
+  /* ── Header ── */
+  header { padding: 24px 32px; border-bottom: 1px solid var(--border);
+           display: flex; align-items: center; gap: 12px; }
+  header svg { color: var(--accent); }
+  header h1 { font-size: 1.25rem; font-weight: 700; color: var(--text); }
+  header span { color: var(--dim); font-size: 12px; margin-left: 4px; }
+
+  /* ── Main layout ── */
+  main { max-width: 1400px; margin: 0 auto; padding: 32px; }
+
+  /* ── Search form ── */
+  .search-card { background: var(--surface); border: 1px solid var(--border);
+                 border-radius: 12px; padding: 32px; margin-bottom: 32px; }
+  .search-card h2 { font-size: 1.1rem; margin-bottom: 8px; }
+  .search-card p  { color: var(--dim); margin-bottom: 20px; font-size: 13px; }
+  .input-row { display: flex; gap: 12px; }
+  .input-row input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 16px; color: var(--text);
+    font-size: 14px; outline: none; transition: border-color .2s;
+  }
+  .input-row input:focus { border-color: var(--accent); }
+  .input-row input::placeholder { color: var(--dim); }
+  .btn { background: var(--accent); color: #fff; border: none; border-radius: 8px;
+         padding: 10px 24px; font-size: 14px; font-weight: 600; cursor: pointer;
+         transition: opacity .2s; white-space: nowrap; }
+  .btn:hover { opacity: .85; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-outline { background: transparent; border: 1px solid var(--border);
+                 color: var(--text); }
+  .btn-outline:hover { border-color: var(--accent); opacity: 1; }
+
+  /* ── Progress ── */
+  #progress { display: none; margin-bottom: 32px; }
+  .phase-bar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .phase { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;
+           border: 1px solid var(--border); color: var(--dim); transition: all .3s; }
+  .phase.active { border-color: var(--accent); color: var(--accent);
+                  background: rgba(99,102,241,.1); }
+  .phase.done   { border-color: var(--green); color: var(--green);
+                  background: rgba(16,185,129,.08); }
+  .status-line { color: var(--dim); font-size: 12px; font-family: monospace;
+                 min-height: 18px; }
+  .stats-row { display: flex; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
+  .stat { background: var(--surface); border: 1px solid var(--border);
+          border-radius: 8px; padding: 12px 20px; }
+  .stat .num { font-size: 1.6rem; font-weight: 700; color: var(--accent); }
+  .stat .lbl { font-size: 11px; color: var(--dim); text-transform: uppercase;
+               letter-spacing: .05em; }
+
+  /* ── Live feed ── */
+  #live-feed { display: none; margin-bottom: 32px; }
+  .section-title { font-size: 13px; font-weight: 600; color: var(--dim);
+                   text-transform: uppercase; letter-spacing: .08em;
+                   margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  .pulse { width: 8px; height: 8px; background: var(--green); border-radius: 50%;
+           animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.8)} }
+
+  /* ── Tables ── */
+  .table-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; }
+  thead th { background: var(--surface2); color: var(--dim); font-size: 11px;
+             text-transform: uppercase; letter-spacing: .05em;
+             padding: 10px 14px; text-align: left; white-space: nowrap; }
+  tbody tr { border-top: 1px solid var(--border); transition: background .15s; }
+  tbody tr:hover { background: var(--surface); }
+  td { padding: 9px 14px; vertical-align: top; word-break: break-word; }
+  td a { color: var(--accent); text-decoration: none; }
+  td a:hover { text-decoration: underline; }
+  .mono { font-family: monospace; font-size: 12px; }
+  .dim-text { color: var(--dim); }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 4px;
+           font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .badge-brute   { background:#1e1b4b; color:#a5b4fc; }
+  .badge-passive { background:#0c2a1a; color:#6ee7b7; }
+  .badge-axfr    { background:#451a03; color:#fbbf24; }
+  .asn-badge { background: #1e293b; color: var(--amber); font-family: monospace;
+               font-size: 11px; padding: 1px 6px; border-radius: 4px; }
+  .tech-tag { display: inline-block; background: #0d2137; color: var(--blue);
+              font-size: 11px; padding: 1px 6px; border-radius: 4px; margin: 1px; }
+
+  /* ── Report sections ── */
+  #report { display: none; }
+  .report-section { margin-bottom: 40px; }
+  .report-section h2 { font-size: .9rem; font-weight: 600; color: var(--accent);
+                       border-bottom: 1px solid var(--border); padding-bottom: 8px;
+                       margin-bottom: 16px; text-transform: uppercase; letter-spacing: .06em; }
+  .txt-record { background: var(--surface); border: 1px solid var(--border);
+                border-radius: 6px; padding: 10px 14px; margin-bottom: 8px;
+                font-family: monospace; font-size: 12px; word-break: break-all;
+                white-space: pre-wrap; color: var(--green); }
+  .soa-grid { display: grid; grid-template-columns: 160px 1fr; gap: 1px;
+              border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .soa-grid .k { background: var(--surface2); padding: 8px 14px; color: var(--dim); }
+  .soa-grid .v { background: var(--surface);  padding: 8px 14px; font-family: monospace; }
+
+  /* ── Toolbar ── */
+  .toolbar { display: flex; gap: 10px; margin-bottom: 24px; flex-wrap: wrap; }
+
+  /* ── Empty / error ── */
+  .empty { padding: 40px; text-align: center; color: var(--dim); }
+  .error-msg { background: rgba(239,68,68,.1); border: 1px solid var(--red);
+               border-radius: 8px; padding: 12px 16px; color: var(--red);
+               margin-bottom: 16px; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<header>
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+  </svg>
+  <h1>Subdomain Scanner <span>powered by Python</span></h1>
+</header>
+
+<main>
+
+  <!-- Search -->
+  <div class="search-card">
+    <h2>Discover subdomains</h2>
+    <p>Passive recon (crt.sh, HackerTarget), DNS zone transfer, brute-force, HTTP probing &amp; IP enrichment.</p>
+    <div class="input-row">
+      <input id="domain-input" type="text" placeholder="e.g. hollard.com.au"
+             autocomplete="off" spellcheck="false">
+      <button class="btn" id="scan-btn" onclick="startScan()">Scan</button>
+    </div>
+  </div>
+
+  <!-- Progress -->
+  <div id="progress">
+    <div class="phase-bar">
+      <div class="phase" id="ph-dns">DNS</div>
+      <div class="phase" id="ph-passive">Passive</div>
+      <div class="phase" id="ph-brute">Brute-force</div>
+      <div class="phase" id="ph-resolve">Resolve</div>
+      <div class="phase" id="ph-enrich">Enrich</div>
+      <div class="phase" id="ph-dns_records">DNS Records</div>
+    </div>
+    <div class="status-line" id="status-line">Starting...</div>
+    <div class="stats-row">
+      <div class="stat"><div class="num" id="stat-found">0</div><div class="lbl">Subdomains Found</div></div>
+      <div class="stat"><div class="num" id="stat-enriched">0</div><div class="lbl">Enriched</div></div>
+    </div>
+  </div>
+
+  <!-- Live feed table -->
+  <div id="live-feed">
+    <div class="section-title"><div class="pulse" id="feed-pulse"></div> Live Discovery</div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Host</th><th>IP</th><th>Source</th></tr></thead>
+        <tbody id="live-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Error -->
+  <div id="error-box" style="display:none"></div>
+
+  <!-- Final Report -->
+  <div id="report">
+    <div class="toolbar">
+      <button class="btn btn-outline" onclick="downloadCSV()">Download CSV</button>
+      <button class="btn btn-outline" onclick="downloadHTML()">Download HTML Report</button>
+    </div>
+
+    <!-- A Records -->
+    <div class="report-section">
+      <h2>A Records — <span id="a-count">0</span> live subdomains</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Host</th><th>IP</th><th>rDNS</th>
+            <th>ASN</th><th>Organisation</th><th>CIDR</th><th>Country</th>
+            <th>Services</th>
+          </tr></thead>
+          <tbody id="a-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- MX Records -->
+    <div class="report-section">
+      <h2>MX Records</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Pref</th><th>Host</th><th>IP</th><th>rDNS</th><th>ASN / Org</th><th>CIDR</th><th>Country</th></tr></thead>
+          <tbody id="mx-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- NS Records -->
+    <div class="report-section">
+      <h2>NS Records</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Host</th><th>IP</th><th>rDNS</th><th>ASN / Org</th><th>CIDR</th><th>Country</th><th>SSH</th></tr></thead>
+          <tbody id="ns-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- TXT Records -->
+    <div class="report-section">
+      <h2>TXT Records</h2>
+      <div id="txt-container"></div>
+    </div>
+
+    <!-- SOA -->
+    <div class="report-section">
+      <h2>SOA Record</h2>
+      <div id="soa-container"></div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────────
+let enrichedData = {};   // host → enriched event
+let dnsData      = {};
+let domain       = '';
+let es           = null;
+
+// ── Start scan ─────────────────────────────────────────────────────────────────
+async function startScan() {
+  domain = document.getElementById('domain-input').value.trim();
+  if (!domain) return;
+
+  // Reset UI
+  reset();
+  document.getElementById('scan-btn').disabled = true;
+  document.getElementById('progress').style.display = 'block';
+  document.getElementById('live-feed').style.display = 'block';
+  document.getElementById('report').style.display   = 'none';
+  document.getElementById('error-box').style.display = 'none';
+
+  // Start scan
+  const res = await fetch('/api/scan', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({domain})
+  });
+  if (!res.ok) {
+    showError('Failed to start scan: ' + await res.text());
+    return;
+  }
+  const {scan_id} = await res.json();
+
+  // Open SSE stream
+  es = new EventSource(`/api/stream/${scan_id}`);
+  es.onmessage = handleEvent;
+  es.onerror   = () => { showError('Stream disconnected'); es.close(); };
+}
+
+// ── Event handler ──────────────────────────────────────────────────────────────
+function handleEvent(e) {
+  const ev = JSON.parse(e.data);
+
+  if (ev.type === 'phase') {
+    setPhase(ev.phase);
+    setStatus(ev.message);
+  }
+
+  else if (ev.type === 'status') {
+    setStatus(ev.message);
+  }
+
+  else if (ev.type === 'subdomain') {
+    addLiveRow(ev.host, ev.ip, ev.source);
+    inc('stat-found');
+  }
+
+  else if (ev.type === 'enriched') {
+    enrichedData[ev.host] = ev;
+    inc('stat-enriched');
+  }
+
+  else if (ev.type === 'dns') {
+    dnsData = ev.data;
+  }
+
+  else if (ev.type === 'error') {
+    showError(ev.message);
+    finishScan();
+  }
+
+  else if (ev.type === 'done') {
+    finishScan();
+  }
+}
+
+// ── Finish ─────────────────────────────────────────────────────────────────────
+function finishScan() {
+  if (es) { es.close(); es = null; }
+  document.getElementById('scan-btn').disabled = false;
+  document.getElementById('feed-pulse').style.display = 'none';
+  setStatus('Scan complete.');
+
+  // Mark all phases done
+  ['dns','passive','brute','resolve','enrich','dns_records'].forEach(markPhaseDone);
+
+  buildReport();
+  document.getElementById('report').style.display = 'block';
+}
+
+// ── Build final report ─────────────────────────────────────────────────────────
+function buildReport() {
+  // A Records
+  const aTbody = document.getElementById('a-tbody');
+  aTbody.innerHTML = '';
+  const hosts = Object.keys(enrichedData).sort();
+  document.getElementById('a-count').textContent = hosts.length;
+
+  for (const host of hosts) {
+    const d = enrichedData[host];
+    const services = buildServices(d.http, d.ssl);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><a href="https://${h(host)}" target="_blank">${h(host)}</a></td>
+      <td class="mono">${h(d.ip)}</td>
+      <td class="mono dim-text">${d.rdns && d.rdns !== d.ip ? h(d.rdns) : ''}</td>
+      <td>${d.asn ? `<span class="asn-badge">${h(d.asn)}</span>` : ''}</td>
+      <td>${h(d.org)}</td>
+      <td class="mono dim-text">${h(d.cidr)}</td>
+      <td>${h(d.country)}</td>
+      <td>${services}</td>`;
+    aTbody.appendChild(tr);
+  }
+
+  // MX
+  const mxTbody = document.getElementById('mx-tbody');
+  mxTbody.innerHTML = '';
+  for (const r of (dnsData.mx || [])) {
+    mxTbody.innerHTML += `<tr>
+      <td class="mono">${h(r.pref)}</td>
+      <td>${h(r.host)}</td>
+      <td class="mono">${h(r.ip)}</td>
+      <td class="mono dim-text">${r.rdns !== r.ip ? h(r.rdns) : ''}</td>
+      <td>${r.asn ? `<span class="asn-badge">${h(r.asn)}</span> ` : ''}${h(r.asn_name)}</td>
+      <td class="mono dim-text">${h(r.cidr)}</td>
+      <td>${h(r.country)}</td></tr>`;
+  }
+
+  // NS
+  const nsTbody = document.getElementById('ns-tbody');
+  nsTbody.innerHTML = '';
+  for (const r of (dnsData.ns || [])) {
+    nsTbody.innerHTML += `<tr>
+      <td>${h(r.host)}</td>
+      <td class="mono">${h(r.ip)}</td>
+      <td class="mono dim-text">${r.rdns !== r.ip ? h(r.rdns) : ''}</td>
+      <td>${r.asn ? `<span class="asn-badge">${h(r.asn)}</span> ` : ''}${h(r.asn_name)}</td>
+      <td class="mono dim-text">${h(r.cidr)}</td>
+      <td>${h(r.country)}</td>
+      <td class="mono dim-text">${h(r.ssh || '')}</td></tr>`;
+  }
+
+  // TXT
+  const txtEl = document.getElementById('txt-container');
+  txtEl.innerHTML = (dnsData.txt || []).map(t =>
+    `<div class="txt-record">${h(t)}</div>`).join('') || '<p class="dim-text">None</p>';
+
+  // SOA
+  const soa = dnsData.soa;
+  const soaEl = document.getElementById('soa-container');
+  if (soa) {
+    soaEl.innerHTML = `<div class="soa-grid">
+      <div class="k">Primary NS</div><div class="v mono">${h(soa.mname)}</div>
+      <div class="k">Hostmaster</div><div class="v mono">${h(soa.rname)}</div>
+      <div class="k">Serial</div><div class="v mono">${h(soa.serial)}</div>
+      <div class="k">Refresh</div><div class="v mono">${h(soa.refresh)}s</div>
+      <div class="k">Retry</div><div class="v mono">${h(soa.retry)}s</div>
+      <div class="k">Expire</div><div class="v mono">${h(soa.expire)}s</div>
+    </div>`;
+  } else {
+    soaEl.innerHTML = '<p class="dim-text">None</p>';
+  }
+}
+
+function buildServices(http, ssl) {
+  let out = '';
+  for (const [label, svc] of Object.entries(http || {})) {
+    out += `<div><b>${h(label)}</b>: ${h(svc.server || '')}`;
+    if (svc.title) out += ` <span class="dim-text">| ${h(svc.title)}</span>`;
+    out += '</div>';
+    for (const t of (svc.tech || [])) out += `<span class="tech-tag">${h(t)}</span>`;
+  }
+  if (ssl?.cn) out += `<div class="dim-text" style="font-size:11px">CN: ${h(ssl.cn)}</div>`;
+  return out;
+}
+
+// ── Download CSV ───────────────────────────────────────────────────────────────
+function downloadCSV() {
+  const cols = ['host','ip','rdns','asn','org','cidr','country',
+                'http_server','http_title','https_server','https_title','ssl_cn','ssl_o'];
+  const rows = [cols.join(',')];
+  for (const host of Object.keys(enrichedData).sort()) {
+    const d = enrichedData[host];
+    const svc = (label, key) => (d.http?.[label]?.[key] || '').replace(/"/g,'""');
+    rows.push([
+      host, d.ip, d.rdns, d.asn, d.org, d.cidr, d.country,
+      svc('http','server'), svc('http','title'),
+      svc('https','server'), svc('https','title'),
+      d.ssl?.cn || '', d.ssl?.o || ''
+    ].map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
+  }
+  download(`${domain}_subdomains.csv`, rows.join('\n'), 'text/csv');
+}
+
+// ── Download HTML ──────────────────────────────────────────────────────────────
+function downloadHTML() {
+  download(`${domain}_report.html`, document.documentElement.outerHTML, 'text/html');
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+function h(str) {
+  return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                          .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function addLiveRow(host, ip, source) {
+  const badge = source === 'brute'   ? '<span class="badge badge-brute">brute</span>'
+              : source === 'axfr'    ? '<span class="badge badge-axfr">axfr</span>'
+              : '<span class="badge badge-passive">passive</span>';
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td class="mono">${h(host)}</td><td class="mono">${h(ip)}</td><td>${badge}</td>`;
+  document.getElementById('live-tbody').prepend(tr);
+}
+
+function setPhase(phase) {
+  document.querySelectorAll('.phase').forEach(el => {
+    if (el.id === `ph-${phase}`) el.classList.add('active');
+  });
+  // Mark previous phases done based on order
+  const order = ['dns','passive','brute','resolve','enrich','dns_records'];
+  const idx = order.indexOf(phase);
+  order.slice(0, idx).forEach(markPhaseDone);
+}
+
+function markPhaseDone(phase) {
+  const el = document.getElementById(`ph-${phase}`);
+  if (el) { el.classList.remove('active'); el.classList.add('done'); }
+}
+
+function setStatus(msg) {
+  document.getElementById('status-line').textContent = msg;
+}
+
+function inc(id) {
+  const el = document.getElementById(id);
+  el.textContent = parseInt(el.textContent || 0) + 1;
+}
+
+function showError(msg) {
+  const box = document.getElementById('error-box');
+  box.style.display = 'block';
+  box.innerHTML = `<div class="error-msg">Error: ${h(msg)}</div>`;
+}
+
+function reset() {
+  enrichedData = {}; dnsData = {};
+  document.getElementById('live-tbody').innerHTML = '';
+  document.getElementById('stat-found').textContent   = '0';
+  document.getElementById('stat-enriched').textContent = '0';
+  document.getElementById('feed-pulse').style.display = '';
+  document.querySelectorAll('.phase').forEach(el => {
+    el.classList.remove('active','done');
+  });
+}
+
+function download(filename, content, mime) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([content], {type: mime}));
+  a.download = filename;
+  a.click();
+}
+
+// Allow Enter key to trigger scan
+document.getElementById('domain-input')
+  .addEventListener('keydown', e => { if (e.key === 'Enter') startScan(); });
+</script>
+</body>
+</html>
