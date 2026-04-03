@@ -5,6 +5,7 @@ Sources: DNS zone transfer, DNS records (NS/MX/TXT/SRV), crt.sh, HackerTarget, b
 """
 
 import sys
+import signal
 import socket
 import argparse
 import csv
@@ -33,6 +34,14 @@ _http_session.mount("http://", _http_adapter)
 _http_session.mount("https://", _http_adapter)
 _http_session.max_redirects = 3
 
+
+def signal_handler(sig, frame):
+    print("\n[!] Scan interrupted by user.")
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, signal_handler)
+
 # ── DNS enumeration ───────────────────────────────────────────────────────────
 
 def get_nameservers(domain: str) -> list[str]:
@@ -60,8 +69,10 @@ def attempt_zone_transfer(domain: str, nameservers: list[str]) -> set[str]:
             print(f"    [!] Zone transfer succeeded on {ns} — {len(found)} records leaked!")
         except dns.exception.FormError:
             pass  # AXFR refused (expected)
-        except Exception:
-            pass
+        except dns.resolver.NXDOMAIN:
+            pass  # Expected for non-existent domains
+        except Exception as e:
+            print(f"[DEBUG] Minor error ignored: {type(e).__name__}: {e}")
     return found
 
 
@@ -81,8 +92,10 @@ def dns_records(domain: str) -> set[str]:
             host = str(r.target).rstrip(".").lower()
             if host.endswith(f".{domain}"):
                 found.add(host)
-    except Exception:
-        pass
+    except dns.resolver.NXDOMAIN:
+        pass  # Expected for non-existent domains
+    except Exception as e:
+        print(f"[DEBUG] Minor error ignored: {type(e).__name__}: {e}")
 
     # MX records
     try:
@@ -90,8 +103,10 @@ def dns_records(domain: str) -> set[str]:
             host = str(r.exchange).rstrip(".").lower()
             if host.endswith(f".{domain}"):
                 found.add(host)
-    except Exception:
-        pass
+    except dns.resolver.NXDOMAIN:
+        pass  # Expected for non-existent domains
+    except Exception as e:
+        print(f"[DEBUG] Minor error ignored: {type(e).__name__}: {e}")
 
     # TXT records — SPF "include:" and "a:" can point to subdomains
     try:
@@ -103,8 +118,10 @@ def dns_records(domain: str) -> set[str]:
                         host = part[len(prefix):].strip().lower()
                         if host.endswith(f".{domain}"):
                             found.add(host)
-    except Exception:
-        pass
+    except dns.resolver.NXDOMAIN:
+        pass  # Expected for non-existent domains
+    except Exception as e:
+        print(f"[DEBUG] Minor error ignored: {type(e).__name__}: {e}")
 
     # SRV records — all prefixes queried in parallel
     srv_prefixes = [
@@ -123,8 +140,10 @@ def dns_records(domain: str) -> set[str]:
                 h = str(r.target).rstrip(".").lower()
                 if h.endswith(f".{domain}"):
                     results.append(h)
-        except Exception:
-            pass
+        except dns.resolver.NXDOMAIN:
+            pass  # Expected for non-existent domains
+        except Exception as e:
+            print(f"[DEBUG] Minor error ignored: {type(e).__name__}: {e}")
         return results
 
     with ThreadPoolExecutor(max_workers=len(srv_prefixes)) as ex:
@@ -364,8 +383,10 @@ _ip_cache: dict[str, dict] = {}
 
 def get_ip_info(ip: str) -> dict:
     """Query ipinfo.io for ASN, CIDR, org, country."""
-    if ip in _ip_cache or ip in ("?", ""):
-        return _ip_cache.get(ip, {})
+    if not ip or ip in ("?", ""):
+        return {}
+    if ip in _ip_cache:
+        return _ip_cache[ip]
     try:
         r = _http_session.get(f"https://ipinfo.io/{ip}/json", timeout=8)
         data = r.json()
@@ -694,76 +715,115 @@ def print_a_records(resolved: dict[str, str], enriched: dict[str, dict]) -> None
 
 # ── DNS record collection ──────────────────────────────────────────────────────
 
+def _collect_mx_records(domain: str, resolver: dns.resolver.Resolver) -> list[dict]:
+    mx_data: list[dict] = []
+    try:
+        mx_raw = sorted(resolver.resolve(domain, "MX"), key=lambda r: r.preference)
+        hosts = [(r.preference, str(r.exchange).rstrip(".")) for r in mx_raw]
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            ips = {h: ex.submit(resolve_ip, h) for _, h in hosts}
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            infos = {h: ex.submit(get_ip_info, ips[h].result()) for _, h in hosts if ips[h].result()}
+        for pref, host in hosts:
+            ip = ips[host].result()
+            info = infos[host].result() if host in infos else {}
+            asn, asn_name = _parse_org(info)
+            mx_data.append(
+                {
+                    "pref": pref,
+                    "host": host,
+                    "ip": ip,
+                    "rdns": reverse_dns(ip) if ip else "",
+                    "asn": asn,
+                    "asn_name": asn_name,
+                    "cidr": info.get("network", ""),
+                    "country": info.get("country", ""),
+                }
+            )
+    except dns.resolver.NXDOMAIN:
+        pass  # Expected for non-existent domains
+    except Exception as e:
+        print(f"[DEBUG] Minor error ignored: {type(e).__name__}: {e}")
+    return mx_data
+
+
+def _collect_ns_records(domain: str, resolver: dns.resolver.Resolver) -> list[dict]:
+    ns_data: list[dict] = []
+    try:
+        ns_raw = resolver.resolve(domain, "NS")
+        hosts = [str(r.target).rstrip(".") for r in ns_raw]
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            ips = {h: ex.submit(resolve_ip, h) for h in hosts}
+        ip_results = {h: ips[h].result() for h in hosts}
+        with ThreadPoolExecutor(max_workers=20) as ex:
+            sshs = {h: ex.submit(check_ssh, ip_results[h]) for h in hosts if ip_results[h]}
+            infos = {h: ex.submit(get_ip_info, ip_results[h]) for h in hosts if ip_results[h]}
+        for host in hosts:
+            ip = ip_results[host]
+            info = infos[host].result() if host in infos else {}
+            asn, asn_name = _parse_org(info)
+            ns_data.append(
+                {
+                    "host": host,
+                    "ip": ip,
+                    "rdns": reverse_dns(ip) if ip else "",
+                    "asn": asn,
+                    "asn_name": asn_name,
+                    "cidr": info.get("network", ""),
+                    "country": info.get("country", ""),
+                    "ssh": sshs[host].result() if host in sshs else "",
+                }
+            )
+    except dns.resolver.NXDOMAIN:
+        pass  # Expected for non-existent domains
+    except Exception as e:
+        print(f"[DEBUG] Minor error ignored: {type(e).__name__}: {e}")
+    return ns_data
+
+
+def _collect_txt_soa_records(domain: str, resolver: dns.resolver.Resolver) -> tuple[list[str], dict | None]:
+    txt_data: list[str] = []
+    soa_data: dict | None = None
+
+    try:
+        for r in resolver.resolve(domain, "TXT"):
+            txt_data.append(b"".join(r.strings).decode(errors="ignore"))
+    except dns.resolver.NXDOMAIN:
+        pass  # Expected for non-existent domains
+    except Exception as e:
+        print(f"[DEBUG] Minor error ignored: {type(e).__name__}: {e}")
+
+    try:
+        soa = resolver.resolve(domain, "SOA")[0]
+        soa_data = {
+            "mname": str(soa.mname).rstrip("."),
+            "rname": str(soa.rname).rstrip("."),
+            "serial": soa.serial,
+            "refresh": soa.refresh,
+            "retry": soa.retry,
+            "expire": soa.expire,
+        }
+    except dns.resolver.NXDOMAIN:
+        pass  # Expected for non-existent domains
+    except Exception as e:
+        print(f"[DEBUG] Minor error ignored: {type(e).__name__}: {e}")
+
+    return txt_data, soa_data
+
+
 def collect_dns_records(domain: str) -> dict:
     """Collect MX, NS, TXT, SOA records and enrich with IP info."""
     resolver = dns.resolver.Resolver()
     resolver.timeout = 5
     resolver.lifetime = 5
-    data = {"mx": [], "ns": [], "txt": [], "soa": None}
 
-    # MX
-    try:
-        mx_raw = sorted(resolver.resolve(domain, "MX"), key=lambda r: r.preference)
-        hosts  = [(r.preference, str(r.exchange).rstrip(".")) for r in mx_raw]
-        with ThreadPoolExecutor(max_workers=10) as ex:
-            ips   = {h: ex.submit(resolve_ip, h)   for _, h in hosts}
-        with ThreadPoolExecutor(max_workers=10) as ex:
-            infos = {h: ex.submit(get_ip_info, ips[h].result()) for _, h in hosts if ips[h].result()}
-        for pref, host in hosts:
-            ip   = ips[host].result()
-            info = infos[host].result() if host in infos else {}
-            asn, asn_name = _parse_org(info)
-            data["mx"].append({"pref": pref, "host": host, "ip": ip,
-                               "rdns": reverse_dns(ip) if ip else "",
-                               "asn": asn, "asn_name": asn_name,
-                               "cidr": info.get("network",""), "country": info.get("country","")})
-    except Exception:
-        pass
-
-    # NS
-    try:
-        ns_raw = resolver.resolve(domain, "NS")
-        hosts  = [str(r.target).rstrip(".") for r in ns_raw]
-        # Phase 1: resolve IPs first so we have concrete addresses for phase 2
-        with ThreadPoolExecutor(max_workers=10) as ex:
-            ips = {h: ex.submit(resolve_ip, h) for h in hosts}
-        ip_results = {h: ips[h].result() for h in hosts}
-        # Phase 2: SSH banner + IP info can now run concurrently with known IPs
-        with ThreadPoolExecutor(max_workers=20) as ex:
-            sshs  = {h: ex.submit(check_ssh,   ip_results[h]) for h in hosts if ip_results[h]}
-            infos = {h: ex.submit(get_ip_info, ip_results[h]) for h in hosts if ip_results[h]}
-        for host in hosts:
-            ip   = ip_results[host]
-            info = infos[host].result() if host in infos else {}
-            asn, asn_name = _parse_org(info)
-            data["ns"].append({"host": host, "ip": ip,
-                               "rdns": reverse_dns(ip) if ip else "",
-                               "asn": asn, "asn_name": asn_name,
-                               "cidr": info.get("network",""), "country": info.get("country",""),
-                               "ssh": sshs[host].result() if host in sshs else ""})
-    except Exception:
-        pass
-
-    # TXT
-    try:
-        for r in resolver.resolve(domain, "TXT"):
-            data["txt"].append(b"".join(r.strings).decode(errors="ignore"))
-    except Exception:
-        pass
-
-    # SOA
-    try:
-        soa = resolver.resolve(domain, "SOA")[0]
-        data["soa"] = {
-            "mname": str(soa.mname).rstrip("."),
-            "rname": str(soa.rname).rstrip("."),
-            "serial": soa.serial, "refresh": soa.refresh,
-            "retry": soa.retry,   "expire": soa.expire,
-        }
-    except Exception:
-        pass
-
-    return data
+    txt_data, soa_data = _collect_txt_soa_records(domain, resolver)
+    return {
+        "mx": _collect_mx_records(domain, resolver),
+        "ns": _collect_ns_records(domain, resolver),
+        "txt": txt_data,
+        "soa": soa_data,
+    }
 
 
 # ── CSV report ─────────────────────────────────────────────────────────────────
