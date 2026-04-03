@@ -11,6 +11,8 @@ import requests
 import json
 import re
 import ssl
+import shutil
+import subprocess
 import dns.resolver
 import dns.zone
 import dns.query
@@ -164,6 +166,26 @@ def fetch_crtsh(domain: str) -> set[str]:
         return subs
     except Exception as ex:
         print(f"[!] crt.sh error: {ex}")
+        return set()
+
+
+def fetch_amass(domain: str) -> set[str]:
+    """Run amass in passive mode and return discovered subdomains."""
+    if not shutil.which("amass"):
+        return set()
+    try:
+        result = subprocess.run(
+            ["amass", "enum", "-passive", "-d", domain, "-timeout", "2"],
+            capture_output=True, text=True, timeout=150,
+        )
+        subs = set()
+        for line in result.stdout.splitlines():
+            line = line.strip().lower()
+            if line.endswith(f".{domain}") or line == domain:
+                subs.add(line)
+        return subs
+    except Exception as ex:
+        print(f"[!] amass error: {ex}")
         return set()
 
 
