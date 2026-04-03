@@ -5,3 +5,8 @@ dnspython
 urllib3
 python-multipart
 python-whois
+aiodns
+httpx
+ipwhois
+rich
+shodan
