@@ -963,10 +963,14 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
   body {{ background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; font-size: 14px; padding: 24px; }}
   h1 {{ font-size: 1.5rem; margin-bottom: 4px; color: var(--accent); }}
   .meta {{ color: var(--dim); font-size: 12px; margin-bottom: 32px; }}
-  .header-row {{ display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }}
-  .theme-toggle {{ background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  .header-row {{ display: block; margin-bottom: 4px; }}
+  .theme-toggle {{ position: fixed; top: 14px; right: 14px; z-index: 1000;
+                   background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
                    padding: 5px 12px; font-size: 12px; color: var(--dim); cursor: pointer; }}
   .theme-toggle:hover {{ color: var(--text); border-color: var(--accent); }}
+  @media (max-width: 640px) {{
+    .theme-toggle {{ top: 10px; right: 10px; }}
+  }}
   .stat-bar {{ display: flex; gap: 16px; margin-bottom: 32px; flex-wrap: wrap; }}
   .stat {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
            padding: 12px 20px; min-width: 120px; }}
@@ -1007,16 +1011,23 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
 <body>
 <script>
   if (localStorage.getItem('theme') === 'light') document.body.classList.add('light');
+  function updateThemeButton() {{
+    var btn = document.getElementById('theme-btn');
+    if (!btn) return;
+    var isLight = document.body.classList.contains('light');
+    btn.textContent = isLight ? '🌙 Dark mode' : '☀️ Light mode';
+  }}
   function toggleTheme() {{
     var light = document.body.classList.toggle('light');
     localStorage.setItem('theme', light ? 'light' : 'dark');
-    document.getElementById('theme-btn').textContent = light ? '🌙 Dark mode' : '☀️ Light mode';
+    updateThemeButton();
   }}
 </script>
 <div class="header-row">
   <h1>Subdomain Recon Report</h1>
   <button id="theme-btn" class="theme-toggle" onclick="toggleTheme()">☀️ Light mode</button>
 </div>
+<script>updateThemeButton();</script>
 <p class="meta">Target: <strong>{_h(domain)}</strong> &nbsp;|&nbsp; Generated: {now}</p>
 
 <div class="stat-bar">
