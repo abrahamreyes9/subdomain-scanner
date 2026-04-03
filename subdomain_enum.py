@@ -738,18 +738,15 @@ def check_takeover(host: str) -> dict | None:
 
 def _probe_one(client: httpx.Client, scheme: str, port: int,
                host: str, timeout: float) -> tuple[str, dict | None]:
-    """Probe a single scheme/port via httpx — HTTP/2 + connection pooling."""
+    """Probe a single scheme/port via shared client — leverages connection pooling."""
     label = scheme if port in (80, 443) else f"{scheme}{port}"
     url   = f"{scheme}://{host}" if port in (80, 443) else f"{scheme}://{host}:{port}"
     try:
-        r      = client.get(url, timeout=timeout)
+        # Use a shorter timeout for the actual GET to avoid hanging the pool
+        r      = client.get(url, timeout=timeout, follow_redirects=True)
         server = r.headers.get("server", "unknown server")
         title  = _get_title(r.text)
         tech   = _detect_tech(dict(r.headers), r.text)
-        chain  = [{"url": str(step.url), "status": step.status_code}
-                  for step in r.history]
-        if chain:
-            chain.append({"url": str(r.url), "status": r.status_code})
         entry: dict = {
             "status":       r.history[0].status_code if r.history else r.status_code,
             "final_status": r.status_code,
@@ -757,27 +754,29 @@ def _probe_one(client: httpx.Client, scheme: str, port: int,
         }
         if title: entry["title"]     = title[:80]
         if tech:  entry["tech"]      = tech
-        if chain: entry["redirects"] = chain
         return label, entry
-    except httpx.ConnectError:
+    except (httpx.ConnectError, httpx.TimeoutException):
         return label, {"status": 0, "final_status": 0, "server": "ssl-error"}
     except Exception:
         return label, None
 
 
-def probe_http(host: str, timeout: float = 5.0) -> dict:
-    """Probe HTTP and HTTPS concurrently using httpx (HTTP/2, keep-alive)."""
+def probe_http(host: str, client: httpx.Client = None, timeout: float = 5.0) -> dict:
+    """Probe HTTP and HTTPS concurrently. Shared client is required for performance."""
     targets = [("https", 443), ("http", 80), ("http", 8080)]
     result  = {}
-    with httpx.Client(verify=_verify_ssl, follow_redirects=True, max_redirects=3,
-                      headers={"User-Agent": "Mozilla/5.0"}) as client:
-        with ThreadPoolExecutor(max_workers=len(targets)) as ex:
-            futures = [ex.submit(_probe_one, client, s, p, host, timeout)
-                       for s, p in targets]
-            for f in as_completed(futures):
-                label, entry = f.result()
-                if entry:
-                    result[label] = entry
+    
+    # Fallback to local client if none provided (slower)
+    if client is None:
+        client = httpx.Client(verify=_verify_ssl, timeout=timeout)
+
+    with ThreadPoolExecutor(max_workers=len(targets)) as ex:
+        futures = [ex.submit(_probe_one, client, s, p, host, timeout)
+                   for s, p in targets]
+        for f in as_completed(futures):
+            label, entry = f.result()
+            if entry:
+                result[label] = entry
     return result
 
 
@@ -801,17 +800,17 @@ def get_ssl_cert_info(host: str, timeout: float = 5.0) -> dict:
         return {}
 
 
-def _enrich_batch(batch: list[tuple[str, str]], threads: int) -> dict[str, dict]:
+def _enrich_batch(batch: list[tuple[str, str]], threads: int, http_client: httpx.Client) -> dict[str, dict]:
     """Enrich a single batch of (host, ip) pairs."""
     enriched = {}
     
     # SSRF Protection: Filter out private/loopback IPs before probing
-    safe_batch = []
     safe_batch = [(h, ip) for h, ip in batch if _is_public_ip(ip)]
 
     with ThreadPoolExecutor(max_workers=threads) as ex:
         f_info     = {host: ex.submit(get_ip_info,      ip)   for host, ip in safe_batch}
-        f_http     = {host: ex.submit(probe_http,        host) for host, _ in safe_batch}
+        # Pass the shared HTTP client to reuse TCP connections
+        f_http     = {host: ex.submit(probe_http,        host, http_client) for host, _ in safe_batch}
         f_ssl      = {host: ex.submit(get_ssl_cert_info, host) for host, _ in safe_batch}
         f_rdns     = {host: ex.submit(reverse_dns,       ip)   for host, ip in safe_batch}
         f_ports    = {host: ex.submit(check_ports,       ip)   for host, ip in safe_batch}
@@ -837,17 +836,24 @@ def _enrich_batch(batch: list[tuple[str, str]], threads: int) -> dict[str, dict]
     return enriched
 
 
-def collect_enrichment(resolved: dict[str, str], threads: int = 50,
+def collect_enrichment(resolved: dict[str, str], threads: int = 60,
                        batch_size: int | None = None) -> dict[str, dict]:
-    """Enrich resolved hosts in batches to avoid resource exhaustion."""
+    """Enrich resolved hosts using a persistent connection pool."""
     items = sorted(resolved.items())
-    # Auto-tune batch size: ~10% of total hosts, clamped between 20 and 100
     if batch_size is None:
         batch_size = max(20, min(100, len(items) // 10 or 20))
+    
     enriched: dict[str, dict] = {}
-    for i in range(0, len(items), batch_size):
-        batch = items[i:i + batch_size]
-        enriched.update(_enrich_batch(batch, threads=min(threads, len(batch) * 6)))
+    
+    # Shared client enables HTTP/2 and TCP Keep-Alive across all hosts
+    limits = httpx.Limits(max_connections=threads, max_keepalive_connections=threads // 2)
+    with httpx.Client(verify=_verify_ssl, http2=True, limits=limits, timeout=5.0) as client:
+        for i in range(0, len(items), batch_size):
+            batch = items[i:i + batch_size]
+            # Adjust threads per batch to prevent over-subscription
+            batch_threads = min(threads, len(batch) * 5)
+            enriched.update(_enrich_batch(batch, threads=batch_threads, http_client=client))
+            
     return enriched
 
 
