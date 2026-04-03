@@ -434,6 +434,31 @@ def get_ip_info(ip: str) -> dict:
         return {}
 
 
+@lru_cache(maxsize=5000)
+def get_shodan_internetdb(ip: str, timeout: float = 3.0) -> dict:
+    """Query Shodan InternetDB for ports, tags, hostnames and CVEs."""
+    if not ip or ip in ("?", ""):
+        return {}
+    try:
+        r = _http_session.get(f"https://internetdb.shodan.io/{ip}", timeout=timeout)
+        if r.status_code == 404:
+            return {}
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, dict):
+            return {}
+        return {
+            "ip": data.get("ip", ip),
+            "ports": data.get("ports", []) or [],
+            "cpes": data.get("cpes", []) or [],
+            "hostnames": data.get("hostnames", []) or [],
+            "tags": data.get("tags", []) or [],
+            "vulns": data.get("vulns", []) or [],
+        }
+    except Exception:
+        return {}
+
+
 def check_ssh(ip: str, timeout: float = 1.5) -> str:
     """Try to grab SSH banner from port 22."""
     try:
@@ -660,9 +685,11 @@ def collect_enrichment(
     threads: int = 100,
     http_timeout: float = 3.0,
     ssl_timeout: float = 3.0,
+    shodan_timeout: float = 3.0,
     do_http: bool = True,
     do_ssl: bool = True,
     do_rdns: bool = True,
+    do_shodan: bool = True,
     enrich_limit: int = 0,
 ) -> dict[str, dict]:
     """Enrich all resolved hosts using a single flat thread pool.
@@ -683,6 +710,8 @@ def collect_enrichment(
                   if do_ssl else {})
         f_rdns = ({host: ex.submit(reverse_dns, ip) for host, ip in items}
                   if do_rdns else {})
+        f_shodan = ({host: ex.submit(get_shodan_internetdb, ip, shodan_timeout) for host, ip in items}
+                    if do_shodan else {})
 
         # Collect results inside the context so futures are guaranteed complete
         for host, ip in items:
@@ -692,6 +721,7 @@ def collect_enrichment(
                 "http": f_http[host].result() if do_http else {},
                 "ssl":  f_ssl[host].result() if do_ssl else {},
                 "rdns": f_rdns[host].result() if do_rdns else "",
+                "shodan": f_shodan[host].result() if do_shodan else {},
             }
     return enriched
 
@@ -716,6 +746,7 @@ def print_a_records(resolved: dict[str, str], enriched: dict[str, dict]) -> None
         http = d.get("http", {})
         ssl  = d.get("ssl", {})
         rdns = d.get("rdns", "")
+        shodan = d.get("shodan", {})
         asn, asn_name = _parse_org(info)
 
         print(f"\n  {host}")
@@ -741,6 +772,15 @@ def print_a_records(resolved: dict[str, str], enriched: dict[str, dict]) -> None
             print(f"  SSL CN : {ssl['cn']}")
         if ssl.get("o"):
             print(f"  SSL O  : {ssl['o']}")
+        if shodan:
+            if shodan.get("ports"):
+                print(f"  Shodan : ports {', '.join(str(p) for p in shodan['ports'])}")
+            if shodan.get("hostnames"):
+                print(f"           hostnames: {', '.join(shodan['hostnames'][:3])}")
+            if shodan.get("tags"):
+                print(f"           tags: {', '.join(shodan['tags'][:5])}")
+            if shodan.get("vulns"):
+                print(f"           vulns: {', '.join(shodan['vulns'][:5])}")
 
     print(f"\n{'═'*70}\n")
 
@@ -861,7 +901,8 @@ def collect_dns_records(domain: str) -> dict:
 def generate_csv(resolved: dict[str, str], enriched: dict[str, dict], path: str) -> None:
     fields = ["host","ip","rdns","asn","asn_name","cidr","country",
               "http_server","http_title","https_server","https_title",
-              "http8080_server","tech","ssl_cn","ssl_o"]
+              "http8080_server","tech","ssl_cn","ssl_o",
+              "shodan_ports","shodan_hostnames","shodan_tags","shodan_vulns","shodan_cpes"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
@@ -870,6 +911,7 @@ def generate_csv(resolved: dict[str, str], enriched: dict[str, dict], path: str)
             info = d.get("info", {})
             http = d.get("http", {})
             ssl  = d.get("ssl", {})
+            shodan = d.get("shodan", {})
             asn, asn_name = _parse_org(info)
             def svc(label, key):
                 return http.get(label, {}).get(key, "")
@@ -883,6 +925,11 @@ def generate_csv(resolved: dict[str, str], enriched: dict[str, dict], path: str)
                 "tech": " | ".join(http.get("http",{}).get("tech",[]) or
                                    http.get("https",{}).get("tech",[])),
                 "ssl_cn": ssl.get("cn",""), "ssl_o": ssl.get("o",""),
+                "shodan_ports": ",".join(str(p) for p in shodan.get("ports", [])),
+                "shodan_hostnames": " | ".join(shodan.get("hostnames", [])),
+                "shodan_tags": " | ".join(shodan.get("tags", [])),
+                "shodan_vulns": " | ".join(shodan.get("vulns", [])),
+                "shodan_cpes": " | ".join(shodan.get("cpes", [])),
             })
     print(f"[+] CSV saved → {path}")
 
@@ -937,6 +984,7 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
         http = d.get("http", {})
         ssl  = d.get("ssl", {})
         rdns = d.get("rdns", "")
+        shodan = d.get("shodan", {})
         asn, asn_name = _parse_org(info)
 
         services = []
@@ -949,6 +997,10 @@ def generate_html(domain: str, resolved: dict[str, str], enriched: dict[str, dic
             services.append(s)
         if ssl.get("cn"):
             services.append(f"<span class='dim'>CN: {_h(ssl['cn'])}</span>")
+        if shodan.get("ports"):
+            services.append(f"<span class='dim'>Shodan ports: {_h(', '.join(str(p) for p in shodan.get('ports', [])))}</span>")
+        if shodan.get("vulns"):
+            services.append(f"<span class='tag'>Vulns: {_h(', '.join(shodan.get('vulns', [])[:5]))}</span>")
 
         rows_a.append(f"""
         <tr>
@@ -1412,12 +1464,14 @@ def main():
     parser.add_argument("--no-http-probe", action="store_true", help="Skip HTTP/HTTPS probing")
     parser.add_argument("--no-ssl", action="store_true", help="Skip SSL certificate lookup")
     parser.add_argument("--no-rdns", action="store_true", help="Skip reverse DNS lookups")
+    parser.add_argument("--no-shodan", action="store_true", help="Skip Shodan InternetDB enrichment")
     parser.add_argument("--no-whois", action="store_true", help="Skip WHOIS query")
     parser.add_argument("--quick", action="store_true", help="Faster scan with lighter enrichment defaults")
     parser.add_argument("--wordlist", help="Path to custom wordlist (one word per line)")
     parser.add_argument("--threads", type=int, default=100, help="Concurrent threads (default 100)")
     parser.add_argument("--http-timeout", type=float, default=3.0, help="HTTP probe timeout in seconds (default 3.0)")
     parser.add_argument("--ssl-timeout", type=float, default=3.0, help="SSL timeout in seconds (default 3.0)")
+    parser.add_argument("--shodan-timeout", type=float, default=3.0, help="Shodan InternetDB timeout in seconds (default 3.0)")
     parser.add_argument("--passive-timeout", type=float, default=12.0, help="Passive source timeout in seconds (default 12.0)")
     parser.add_argument("--enrich-limit", type=int, default=0, help="Only enrich first N resolved hosts (0 = all)")
     parser.add_argument("--output", help="Save results to file")
@@ -1541,26 +1595,30 @@ def main():
     do_http = not args.no_http_probe
     do_ssl  = not args.no_ssl
     do_rdns = not args.no_rdns
+    do_shodan = not args.no_shodan
     enrich_limit = args.enrich_limit
     if args.quick:
         # Quick mode prioritizes speed over depth.
         do_http = False
         do_ssl = False
         do_rdns = False
+        do_shodan = False
         enrich_limit = enrich_limit or 100
 
     # Enrich hosts (IP info always; optional HTTP probe + SSL + rDNS)
     _phase_progress(6, total_phases, "Enrich", scan_start)
     print("[ENRICH] Enriching hosts with IP metadata and service intelligence...")
-    print(f"[ENRICH] Options: http={do_http} ssl={do_ssl} rdns={do_rdns} limit={enrich_limit or 'all'}")
+    print(f"[ENRICH] Options: http={do_http} ssl={do_ssl} rdns={do_rdns} shodan={do_shodan} limit={enrich_limit or 'all'}")
     enriched = collect_enrichment(
         resolved,
         threads=args.threads,
         http_timeout=args.http_timeout,
         ssl_timeout=args.ssl_timeout,
+        shodan_timeout=args.shodan_timeout,
         do_http=do_http,
         do_ssl=do_ssl,
         do_rdns=do_rdns,
+        do_shodan=do_shodan,
         enrich_limit=enrich_limit,
     )
 
