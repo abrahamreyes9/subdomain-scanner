@@ -4,7 +4,7 @@ emitting structured events into a queue for the SSE stream.
 """
 
 import queue
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
 from subdomain_enum import (
     fetch_crtsh,
@@ -21,7 +21,17 @@ from subdomain_enum import (
 )
 
 
-def run_scan(domain: str, q: queue.Queue) -> None:
+def _safe_result(future: Future, source: str, emit) -> set:
+    """Return future result, emitting a warning and returning empty set on failure."""
+    try:
+        return future.result()
+    except Exception as e:
+        emit({"type": "warning", "message": f"{source} failed: {e}"})
+        return set()
+
+
+def run_scan(domain: str, q: queue.Queue,
+             max_workers: int = 100, enrich_threads: int = 50) -> None:
     """Run a full scan and push events into q. Puts None when done."""
 
     def emit(data: dict) -> None:
@@ -63,6 +73,7 @@ def run_scan(domain: str, q: queue.Queue) -> None:
         dns_sub = extract_dns_subdomains(domain)
         found |= dns_sub
         emit({"type": "status", "message": f"DNS records yielded {len(dns_sub)} subdomain(s)"})
+        emit({"type": "status", "message": f"Total unique so far: {len(found)}"})
 
         # ── Phase 2: Passive sources ──────────────────────────────────────────
         emit({"type": "phase", "phase": "passive", "message": "Querying passive sources (crt.sh, HackerTarget)..."})
@@ -70,13 +81,13 @@ def run_scan(domain: str, q: queue.Queue) -> None:
         with ThreadPoolExecutor(max_workers=2) as ex:
             f_crt = ex.submit(fetch_crtsh, domain)
             f_ht  = ex.submit(fetch_hackertarget, domain)
-            crt   = f_crt.result()
-            ht    = f_ht.result()
+            crt   = _safe_result(f_crt, "crt.sh", emit)
+            ht    = _safe_result(f_ht,  "HackerTarget", emit)
 
         found |= crt | ht
         emit({"type": "status", "message": f"crt.sh: {len(crt)} subdomains"})
         emit({"type": "status", "message": f"HackerTarget: {len(ht)} subdomains"})
-        emit({"type": "status", "message": f"Passive total: {len(crt | ht)} unique subdomains"})
+        emit({"type": "status", "message": f"Total unique so far: {len(found)}"})
 
         # ── Phase 3: Brute-force ──────────────────────────────────────────────
         emit({"type": "phase", "phase": "brute",
@@ -86,7 +97,7 @@ def run_scan(domain: str, q: queue.Queue) -> None:
         total_brute = len(candidates)
         completed_brute = 0
 
-        with ThreadPoolExecutor(max_workers=100) as ex:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = {ex.submit(resolve, c): c for c in candidates}
             for f in as_completed(futures):
                 result = f.result()
@@ -96,13 +107,13 @@ def run_scan(domain: str, q: queue.Queue) -> None:
                     found.add(host)
                     resolved[host] = ip
                     emit({"type": "subdomain", "host": host, "ip": ip, "source": "brute"})
-                # Emit progress every 50 completions and at the end
                 if completed_brute % 50 == 0 or completed_brute == total_brute:
                     emit({"type": "progress", "phase": "brute",
                           "done": completed_brute, "total": total_brute,
                           "found": len(resolved)})
 
-        emit({"type": "status", "message": f"Brute-force complete — {len(resolved)} live so far"})
+        emit({"type": "status", "message": f"Brute-force complete — {len(resolved)} live"})
+        emit({"type": "status", "message": f"Total unique so far: {len(found)}"})
 
         # ── Phase 4: Resolve passive/DNS hits not yet resolved ────────────────
         passive_only = found - set(resolved.keys())
@@ -112,7 +123,7 @@ def run_scan(domain: str, q: queue.Queue) -> None:
             total_resolve = len(passive_only)
             completed_resolve = 0
 
-            with ThreadPoolExecutor(max_workers=100) as ex:
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 futures = {ex.submit(resolve, s): s for s in passive_only}
                 for f in as_completed(futures):
                     result = f.result()
@@ -133,9 +144,9 @@ def run_scan(domain: str, q: queue.Queue) -> None:
               "message": f"Enriching {len(resolved)} live subdomains..."})
         emit({"type": "status", "message": "Running HTTP probe, IP info, SSL cert, rDNS, port scan, takeover check..."})
 
-        enriched = collect_enrichment(resolved, threads=50)
+        enriched = collect_enrichment(resolved, threads=enrich_threads)
 
-        emit({"type": "status", "message": f"Enrichment complete — processing {len(enriched)} hosts"})
+        emit({"type": "status", "message": f"Enrichment complete — {len(enriched)} hosts processed"})
 
         for host, data in enriched.items():
             info      = data.get("info", {})

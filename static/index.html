@@ -469,6 +469,10 @@ function handleEvent(e) {
     dnsData = ev.data;
   }
 
+  else if (ev.type === 'warning') {
+    logEntry('⚠ ' + ev.message, 'log-status');
+  }
+
   else if (ev.type === 'error') {
     showError(ev.message);
     finishScan();
