@@ -24,6 +24,15 @@ import urllib3
 import whois as whois_lib
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# ── shared HTTP session with connection pooling ──────────────────────────────
+_http_session = requests.Session()
+_http_adapter = requests.adapters.HTTPAdapter(
+    pool_connections=100, pool_maxsize=100, max_retries=0,
+)
+_http_session.mount("http://", _http_adapter)
+_http_session.mount("https://", _http_adapter)
+_http_session.max_redirects = 3
+
 # ── DNS enumeration ───────────────────────────────────────────────────────────
 
 def get_nameservers(domain: str) -> list[str]:
@@ -131,7 +140,7 @@ def fetch_crtsh(domain: str) -> set[str]:
     """Query crt.sh certificate transparency logs."""
     url = f"https://crt.sh/?q=%.{domain}&output=json"
     try:
-        r = requests.get(url, timeout=20)
+        r = _http_session.get(url, timeout=20)
         r.raise_for_status()
         entries = r.json()
         subs = set()
@@ -150,7 +159,7 @@ def fetch_hackertarget(domain: str) -> set[str]:
     """Query HackerTarget's free subdomain API."""
     url = f"https://api.hackertarget.com/hostsearch/?q={domain}"
     try:
-        r = requests.get(url, timeout=20)
+        r = _http_session.get(url, timeout=20)
         r.raise_for_status()
         subs = set()
         for line in r.text.splitlines():
@@ -358,7 +367,7 @@ def get_ip_info(ip: str) -> dict:
     if ip in _ip_cache or ip in ("?", ""):
         return _ip_cache.get(ip, {})
     try:
-        r = requests.get(f"https://ipinfo.io/{ip}/json", timeout=8)
+        r = _http_session.get(f"https://ipinfo.io/{ip}/json", timeout=8)
         data = r.json()
         _ip_cache[ip] = data
         return data
@@ -563,12 +572,10 @@ def _probe_one(session: requests.Session, scheme: str, port: int,
 
 def probe_http(host: str, timeout: float = 5.0) -> dict:
     """Probe HTTP and HTTPS on a host concurrently, return service info."""
-    session = requests.Session()
-    session.max_redirects = 3
     targets = [("https", 443), ("http", 80), ("http", 8080)]
     result  = {}
     with ThreadPoolExecutor(max_workers=len(targets)) as ex:
-        futures = [ex.submit(_probe_one, session, s, p, host, timeout) for s, p in targets]
+        futures = [ex.submit(_probe_one, _http_session, s, p, host, timeout) for s, p in targets]
         for f in as_completed(futures):
             label, entry = f.result()
             if entry:
