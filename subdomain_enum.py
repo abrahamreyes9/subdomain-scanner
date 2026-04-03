@@ -66,6 +66,18 @@ def _vprint(*args, **kwargs) -> None:
         print(*args, **kwargs)
 
 
+# ── Scan-summary helper ───────────────────────────────────────────────────────
+
+def _print_scan_summary(all_subdomains: set[str], live: dict[str, str]) -> None:
+    """Print total discovered / live / not-live counts."""
+    dead = all_subdomains - set(live.keys())
+    print("\n" + "─" * 70)
+    print(f"Total subdomains discovered : {len(all_subdomains)}")
+    print(f"Live (responding)           : {len(live)}")
+    print(f"Not Live (no response)      : {len(dead)}")
+    print("─" * 70 + "\n")
+
+
 def rate_limited(max_per_second: float):
     """Thread-safe decorator that caps how often a function may be called."""
     min_interval = 1.0 / max_per_second
@@ -1197,6 +1209,7 @@ def main():
         print(f"    crt.sh: {len(crt)}  HackerTarget: {len(ht)}")
         found |= crt
         found |= ht
+        _print_scan_summary(found, resolved)
 
     # Brute-force — streams hits to screen as found
     if not args.no_brute:
@@ -1213,6 +1226,7 @@ def main():
         brute = brute_force(domain, wordlist, threads=args.threads)
         print(f"    Brute-force: {len(brute)} live")
         found |= brute
+        _print_scan_summary(found, resolved)
 
     # Resolve all found subdomains (streams hits to screen as they come in)
     print(f"\n[*] Resolving {len(found)} unique subdomains ...")
@@ -1220,6 +1234,7 @@ def main():
 
     live = sorted(resolved.items())
     print(f"\n[+] {len(live)} live subdomains found for {domain}")
+    _print_scan_summary(found, resolved)
 
     if args.output:
         with open(args.output, "w") as f:
@@ -1242,6 +1257,8 @@ def main():
     print_dns_report(dns_data)
 
     # Output reports
+    print("\n[+] Scan finished")
+    _print_scan_summary(found, resolved)
     stem = domain.replace(".", "_")
     generate_csv(resolved, enriched, f"{stem}_report.csv")
     generate_html(domain, resolved, enriched, dns_data, f"{stem}_report.html")
