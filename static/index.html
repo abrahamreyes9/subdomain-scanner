@@ -271,9 +271,9 @@
         </div>
       </div>
       <div class="complete-actions">
-        <button class="btn btn-dl" onclick="downloadCSV()">
+        <button class="btn btn-dl" onclick="downloadTXT()">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          Download CSV
+          Download Report (.txt)
         </button>
         <button class="btn btn-dl btn-dl-secondary" onclick="downloadHTML()">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -520,94 +520,129 @@ function buildServices(http, ssl) {
   return out;
 }
 
-// ── CSV helpers ────────────────────────────────────────────────────────────────
-function csvCell(v) {
-  // Properly escape a single CSV cell value
-  const s = String(v ?? '').replace(/"/g, '""');
-  return `"${s}"`;
-}
-function csvRow(arr)  { return arr.map(csvCell).join(','); }
-function csvHead(arr) { return arr.map(csvCell).join(','); }
-
-// ── Download CSV ───────────────────────────────────────────────────────────────
-function downloadCSV() {
-  const lines = [];
+// ── Download TXT Report ────────────────────────────────────────────────────────
+function downloadTXT() {
+  const L   = [];
   const now = new Date().toLocaleString();
+  const SEP = '='.repeat(80);
+  const DIV = '-'.repeat(80);
+  const pad = (s, n) => String(s ?? '').padEnd(n);
+  const line = (...cols) => cols.join('  ');
 
-  // ── Report header ──
-  lines.push(csvRow(['SUBDOMAIN RECON REPORT']));
-  lines.push(csvRow([`Target: ${domain}`]));
-  lines.push(csvRow([`Generated: ${now}`]));
-  lines.push('');
+  // ── Header ──────────────────────────────────────────────────────────────────
+  L.push(SEP);
+  L.push('  SUBDOMAIN RECON REPORT');
+  L.push(`  Target    : ${domain}`);
+  L.push(`  Generated : ${now}`);
+  L.push(`  Subdomains: ${Object.keys(enrichedData).length} live`);
+  L.push(SEP);
 
-  // ── A Records (Subdomains) ──
-  lines.push(csvRow(['=== A RECORDS (SUBDOMAINS) ===']));
-  lines.push(csvHead([
-    'Host', 'IP', 'Reverse DNS', 'ASN', 'Organisation', 'CIDR', 'Country',
-    'HTTP Server', 'HTTP Title', 'HTTP Technologies',
-    'HTTPS Server', 'HTTPS Title', 'HTTPS Technologies',
-    'HTTP 8080 Server', 'SSL Common Name', 'SSL Organisation'
-  ]));
+  // ── A Records ───────────────────────────────────────────────────────────────
+  L.push('');
+  L.push('  A RECORDS (SUBDOMAINS)');
+  L.push(DIV);
 
   for (const host of Object.keys(enrichedData).sort()) {
-    const d   = enrichedData[host];
-    const svc = (label, key) => d.http?.[label]?.[key] ?? '';
-    const tec = (label)      => (d.http?.[label]?.tech ?? []).join(' | ');
-    lines.push(csvRow([
-      host,
-      d.ip,
-      d.rdns !== d.ip ? d.rdns : '',
-      d.asn,
-      d.org,
-      d.cidr,
-      d.country,
-      svc('http',   'server'), svc('http',   'title'), tec('http'),
-      svc('https',  'server'), svc('https',  'title'), tec('https'),
-      svc('http8080','server'),
-      d.ssl?.cn ?? '',
-      d.ssl?.o  ?? '',
-    ]));
+    const d = enrichedData[host];
+    L.push('');
+    L.push(`  Host    : ${host}`);
+    L.push(`  IP      : ${d.ip}`);
+    if (d.rdns && d.rdns !== d.ip)
+      L.push(`  rDNS    : ${d.rdns}`);
+    if (d.asn)
+      L.push(`  ASN     : ${d.asn}`);
+    if (d.org)
+      L.push(`  Org     : ${d.org}`);
+    if (d.cidr)
+      L.push(`  CIDR    : ${d.cidr}`);
+    if (d.country)
+      L.push(`  Country : ${d.country}`);
+
+    for (const [label, svc] of Object.entries(d.http || {})) {
+      L.push(`  ${pad(label.toUpperCase(), 8)}: ${svc.server || ''}${svc.title ? '  |  ' + svc.title : ''}`);
+      if (svc.tech?.length)
+        L.push(`           Tech: ${svc.tech.join(', ')}`);
+    }
+    if (d.ssl?.cn) L.push(`  SSL CN  : ${d.ssl.cn}`);
+    if (d.ssl?.o)  L.push(`  SSL Org : ${d.ssl.o}`);
+    L.push('  ' + DIV.slice(2));
   }
-  lines.push('');
 
-  // ── MX Records ──
-  lines.push(csvRow(['=== MX RECORDS ===']));
-  lines.push(csvHead(['Priority', 'Host', 'IP', 'Reverse DNS', 'ASN', 'Organisation', 'CIDR', 'Country']));
-  for (const r of (dnsData.mx || [])) {
-    lines.push(csvRow([r.pref, r.host, r.ip, r.rdns !== r.ip ? r.rdns : '',
-                       r.asn, r.asn_name, r.cidr, r.country]));
+  // ── MX Records ──────────────────────────────────────────────────────────────
+  L.push('');
+  L.push('  MX RECORDS');
+  L.push(DIV);
+  if ((dnsData.mx || []).length === 0) {
+    L.push('  (none)');
+  } else {
+    for (const r of dnsData.mx) {
+      L.push('');
+      L.push(`  Priority : ${r.pref}`);
+      L.push(`  Host     : ${r.host}`);
+      L.push(`  IP       : ${r.ip}`);
+      if (r.rdns && r.rdns !== r.ip) L.push(`  rDNS     : ${r.rdns}`);
+      if (r.asn)     L.push(`  ASN      : ${r.asn}`);
+      if (r.asn_name)L.push(`  Org      : ${r.asn_name}`);
+      if (r.cidr)    L.push(`  CIDR     : ${r.cidr}`);
+      if (r.country) L.push(`  Country  : ${r.country}`);
+    }
   }
-  lines.push('');
 
-  // ── NS Records ──
-  lines.push(csvRow(['=== NS RECORDS ===']));
-  lines.push(csvHead(['Host', 'IP', 'Reverse DNS', 'ASN', 'Organisation', 'CIDR', 'Country', 'SSH Banner']));
-  for (const r of (dnsData.ns || [])) {
-    lines.push(csvRow([r.host, r.ip, r.rdns !== r.ip ? r.rdns : '',
-                       r.asn, r.asn_name, r.cidr, r.country, r.ssh || '']));
+  // ── NS Records ──────────────────────────────────────────────────────────────
+  L.push('');
+  L.push('  NS RECORDS');
+  L.push(DIV);
+  if ((dnsData.ns || []).length === 0) {
+    L.push('  (none)');
+  } else {
+    for (const r of dnsData.ns) {
+      L.push('');
+      L.push(`  Host     : ${r.host}`);
+      L.push(`  IP       : ${r.ip}`);
+      if (r.rdns && r.rdns !== r.ip) L.push(`  rDNS     : ${r.rdns}`);
+      if (r.asn)     L.push(`  ASN      : ${r.asn}`);
+      if (r.asn_name)L.push(`  Org      : ${r.asn_name}`);
+      if (r.cidr)    L.push(`  CIDR     : ${r.cidr}`);
+      if (r.country) L.push(`  Country  : ${r.country}`);
+      if (r.ssh)     L.push(`  SSH      : ${r.ssh}`);
+    }
   }
-  lines.push('');
 
-  // ── TXT Records ──
-  lines.push(csvRow(['=== TXT RECORDS ===']));
-  lines.push(csvHead(['Value']));
-  for (const t of (dnsData.txt || [])) lines.push(csvCell(t));
-  lines.push('');
+  // ── TXT Records ─────────────────────────────────────────────────────────────
+  L.push('');
+  L.push('  TXT RECORDS');
+  L.push(DIV);
+  if ((dnsData.txt || []).length === 0) {
+    L.push('  (none)');
+  } else {
+    for (const t of dnsData.txt) {
+      L.push('');
+      L.push(`  ${t}`);
+    }
+  }
 
-  // ── SOA ──
+  // ── SOA Record ──────────────────────────────────────────────────────────────
   const soa = dnsData.soa;
+  L.push('');
+  L.push('  SOA RECORD');
+  L.push(DIV);
   if (soa) {
-    lines.push(csvRow(['=== SOA RECORD ===']));
-    lines.push(csvHead(['Field', 'Value']));
-    lines.push(csvRow(['Primary NS',  soa.mname]));
-    lines.push(csvRow(['Hostmaster',  soa.rname]));
-    lines.push(csvRow(['Serial',      soa.serial]));
-    lines.push(csvRow(['Refresh (s)', soa.refresh]));
-    lines.push(csvRow(['Retry (s)',   soa.retry]));
-    lines.push(csvRow(['Expire (s)',  soa.expire]));
+    L.push(`  Primary NS : ${soa.mname}`);
+    L.push(`  Hostmaster : ${soa.rname}`);
+    L.push(`  Serial     : ${soa.serial}`);
+    L.push(`  Refresh    : ${soa.refresh}s`);
+    L.push(`  Retry      : ${soa.retry}s`);
+    L.push(`  Expire     : ${soa.expire}s`);
+  } else {
+    L.push('  (none)');
   }
 
-  download(`${domain}_recon_report.csv`, lines.join('\r\n'), 'text/csv');
+  L.push('');
+  L.push(SEP);
+  L.push('  END OF REPORT');
+  L.push(SEP);
+
+  download(`${domain}_recon_report.txt`, L.join('\r\n'), 'text/plain');
 }
 
 // ── Download HTML ──────────────────────────────────────────────────────────────
@@ -671,8 +706,7 @@ function reset() {
 }
 
 function download(filename, content, mime) {
-  // UTF-8 BOM ensures Excel opens CSV correctly with special characters
-  const bom  = mime === 'text/csv' ? '\uFEFF' : '';
+  const bom  = '';
   const blob = new Blob([bom + content], {type: `${mime};charset=utf-8;`});
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
