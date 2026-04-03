@@ -114,7 +114,6 @@ def run_scan(domain: str, q: queue.Queue) -> None:
                 "ssl":      data.get("ssl", {}),
                 "ports":    data.get("ports", []),
                 "takeover": data.get("takeover"),
-                "api":      data.get("api", []),
             })
 
         # ── Phase 6: DNS records ──────────────────────────────────────────────

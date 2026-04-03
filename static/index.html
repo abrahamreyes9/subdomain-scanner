@@ -150,15 +150,6 @@
   .redirect-chain { font-size:11px; color:var(--dim); font-family:monospace; }
   .redirect-chain span { color:var(--amber); }
 
-  /* ── API endpoints ── */
-  .api-hit { font-size:11px; font-family:monospace; margin:2px 0; }
-  .api-hit .ap { color:var(--accent); }
-  .api-hit .an { color:var(--green); font-size:10px; }
-  .api-section { background:rgba(99,102,241,.06); border:1px solid rgba(99,102,241,.2);
-                 border-radius:6px; padding:8px 12px; margin-top:4px; }
-  .api-section-title { font-size:11px; font-weight:600; color:var(--accent);
-                       text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px; }
-
   /* ── Takeover warning ── */
   .takeover-banner { background:rgba(239,68,68,.08); border:1px solid var(--red);
                      border-radius:10px; padding:16px 20px; margin-bottom:28px; }
@@ -299,7 +290,8 @@
   <div id="error-box" style="display:none"></div>
 
   <!-- Completion card (shown when scan finishes) -->
-  <div id="complete-card" style="display:none">
+  <div id="complete-card" style="display:none" class="complete-card-wrap">
+    <!-- Top row: check + summary + download buttons -->
     <div class="complete-banner">
       <div class="complete-info">
         <div class="complete-check">✓</div>
@@ -323,18 +315,17 @@
         </button>
       </div>
     </div>
+    <!-- Takeover risks sit inside the card, below the buttons -->
+    <div id="takeover-section" style="display:none">
+      <div class="takeover-inner">
+        <div class="takeover-header">⚠ Potential Subdomain Takeover Risks</div>
+        <div id="takeover-list"></div>
+      </div>
+    </div>
   </div>
 
   <!-- Final Report -->
   <div id="report">
-
-    <!-- Takeover Risks (shown only if found) -->
-    <div id="takeover-section" style="display:none">
-      <div class="takeover-banner">
-        <h3>⚠ Potential Subdomain Takeover Risks</h3>
-        <div id="takeover-list"></div>
-      </div>
-    </div>
 
     <!-- A Records -->
     <div class="report-section">
@@ -369,17 +360,6 @@
         <table>
           <thead><tr><th>Host</th><th>IP</th><th>rDNS</th><th>ASN / Org</th><th>CIDR</th><th>Country</th><th>SSH</th></tr></thead>
           <tbody id="ns-tbody"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Exposed API Endpoints -->
-    <div class="report-section" id="api-section" style="display:none">
-      <h2>Exposed API Endpoints</h2>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Host</th><th>Path</th><th>Status</th><th>Content-Type</th><th>Note</th></tr></thead>
-          <tbody id="api-tbody"></tbody>
         </table>
       </div>
     </div>
@@ -537,33 +517,12 @@ function buildReport() {
       <td data-label="CIDR" class="mono dim-text">${h(d.cidr)}</td>
       <td data-label="Country">${h(d.country)}</td>
       <td data-label="Open Ports">${ports}</td>
-      <td data-label="Services">${services}${buildApiHits(d.api)}</td>`;
+      <td data-label="Services">${services}</td>`;
     aTbody.appendChild(tr);
   }
 
   document.getElementById('takeover-section').style.display =
     takeovers > 0 ? 'block' : 'none';
-
-  // API Endpoints table
-  const apiTbody = document.getElementById('api-tbody');
-  apiTbody.innerHTML = '';
-  let apiHits = 0;
-  for (const host of hosts) {
-    const d = enrichedData[host];
-    for (const hit of (d.api || [])) {
-      apiHits++;
-      const sc = hit.status;
-      const cls = sc === 200 ? 's2' : sc === 401 || sc === 403 ? 's4' : 's3';
-      apiTbody.innerHTML += `<tr>
-        <td><a href="https://${h(host)}" target="_blank">${h(host)}</a></td>
-        <td class="mono"><a href="https://${h(host)}${h(hit.path)}" target="_blank">${h(hit.path)}</a></td>
-        <td><span class="status ${cls}">${h(hit.status)}</span></td>
-        <td class="mono dim-text">${h(hit.content_type)}</td>
-        <td class="dim-text">${h(hit.note)}</td>
-      </tr>`;
-    }
-  }
-  document.getElementById('api-section').style.display = apiHits > 0 ? 'block' : 'none';
 
   // MX
   const mxTbody = document.getElementById('mx-tbody');
@@ -642,21 +601,6 @@ function buildServices(http, ssl) {
   return out;
 }
 
-function buildApiHits(api) {
-  if (!api?.length) return '';
-  let out = '<div class="api-section"><div class="api-section-title">Exposed API Paths</div>';
-  for (const hit of api) {
-    const sc  = hit.status;
-    const cls = sc === 200 ? 's2' : sc === 401 || sc === 403 ? 's4' : 's3';
-    out += `<div class="api-hit"><span class="status ${cls}">${h(hit.status)}</span> `;
-    out += `<span class="ap">${h(hit.path)}</span>`;
-    if (hit.note) out += ` <span class="an">[${h(hit.note)}]</span>`;
-    out += `</div>`;
-  }
-  out += '</div>';
-  return out;
-}
-
 // High-risk ports that should flag as dangerous
 const DANGER_PORTS = new Set([21,22,23,25,445,3306,3389,5432,5900,6379,9200,27017]);
 
@@ -722,11 +666,6 @@ function downloadTXT() {
     }
     if (d.ssl?.cn) L.push(`  SSL CN  : ${d.ssl.cn}`);
     if (d.ssl?.o)  L.push(`  SSL Org : ${d.ssl.o}`);
-    if (d.api?.length) {
-      L.push(`  API Paths:`);
-      for (const hit of d.api)
-        L.push(`    [${hit.status}] ${hit.path}${hit.note ? '  — ' + hit.note : ''}`);
-    }
     if (d.takeover) {
       L.push(`  TAKEOVER: CNAME → ${d.takeover.cname}`);
       L.push(`            Service: ${d.takeover.service} | Fingerprint: "${d.takeover.fingerprint}"`);
