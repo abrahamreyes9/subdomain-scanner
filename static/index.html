@@ -112,14 +112,98 @@
   .soa-grid .k { background: var(--surface2); padding: 8px 14px; color: var(--dim); }
   .soa-grid .v { background: var(--surface);  padding: 8px 14px; font-family: monospace; }
 
-  /* ── Toolbar ── */
-  .toolbar { display: flex; gap: 10px; margin-bottom: 24px; flex-wrap: wrap; }
+  /* ── Completion card ── */
+  .complete-banner { background: var(--surface); border: 1px solid var(--green);
+                     border-radius: 12px; padding: 20px 24px; margin-bottom: 28px;
+                     display: flex; align-items: center; justify-content: space-between;
+                     gap: 16px; flex-wrap: wrap; }
+  .complete-info { display: flex; align-items: center; gap: 14px; }
+  .complete-check { width: 36px; height: 36px; background: rgba(16,185,129,.15);
+                    border: 1px solid var(--green); border-radius: 50%;
+                    display: flex; align-items: center; justify-content: center;
+                    color: var(--green); font-size: 16px; font-weight: 700; flex-shrink: 0; }
+  .complete-title { font-weight: 700; font-size: 1rem; color: var(--green); }
+  .complete-sub   { font-size: 12px; color: var(--dim); margin-top: 2px; }
+  .complete-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn-dl { display: flex; align-items: center; gap: 8px; padding: 10px 20px;
+            font-size: 14px; background: var(--green); color: #fff; min-height: 44px; }
+  .btn-dl:hover { opacity: .85; }
+  .btn-dl-secondary { background: transparent; border: 1px solid var(--green);
+                      color: var(--green); }
+  .btn-dl-secondary:hover { background: rgba(16,185,129,.1); opacity: 1; }
 
   /* ── Empty / error ── */
   .empty { padding: 40px; text-align: center; color: var(--dim); }
   .error-msg { background: rgba(239,68,68,.1); border: 1px solid var(--red);
                border-radius: 8px; padding: 12px 16px; color: var(--red);
                margin-bottom: 16px; font-size: 13px; }
+
+  /* ── Mobile ─────────────────────────────────────────────────────────────── */
+  @media (max-width: 640px) {
+    header { padding: 14px 16px; }
+    header span { display: none; }
+    header h1 { font-size: 1rem; }
+
+    main { padding: 16px; }
+
+    .search-card { padding: 20px 16px; margin-bottom: 20px; border-radius: 10px; }
+    .search-card h2 { font-size: 1rem; }
+
+    /* Stack input + button vertically */
+    .input-row { flex-direction: column; }
+    .input-row input { font-size: 16px; } /* prevents iOS auto-zoom */
+    .input-row .btn { width: 100%; padding: 13px; font-size: 15px; }
+
+    /* Bigger touch targets */
+    .btn { min-height: 44px; }
+
+    /* Stats stretch full width */
+    .stats-row { gap: 10px; }
+    .stat { flex: 1; padding: 10px 12px; }
+    .stat .num { font-size: 1.3rem; }
+
+    /* Phase bar wraps tightly */
+    .phase { font-size: 11px; padding: 3px 9px; }
+
+    /* Completion card stacks on mobile */
+    .complete-banner { flex-direction: column; align-items: flex-start; }
+    .complete-actions { width: 100%; flex-direction: column; }
+    .btn-dl { width: 100%; justify-content: center; }
+
+    /* Smooth iOS table scroll */
+    .table-wrap { -webkit-overflow-scrolling: touch; }
+
+    /* Section title smaller */
+    .report-section h2 { font-size: .8rem; }
+
+    /* SOA grid — stack key/value on very narrow screens */
+    .soa-grid { grid-template-columns: 120px 1fr; }
+
+    /* A Records — switch to card layout on mobile */
+    #a-tbody tr { display: block; border: 1px solid var(--border);
+                  border-radius: 8px; margin-bottom: 12px; padding: 12px;
+                  background: var(--surface); }
+    #a-tbody tr:first-child { border-top: 1px solid var(--border); }
+    #a-tbody td { display: block; padding: 3px 0; border: none; font-size: 13px; }
+    #a-tbody td::before {
+      content: attr(data-label);
+      font-size: 10px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: .05em; color: var(--dim); display: block; margin-bottom: 2px;
+    }
+    #a-tbody td:empty { display: none; }
+    /* Hide less critical columns on mobile */
+    #a-tbody td[data-label="rDNS"],
+    #a-tbody td[data-label="CIDR"] { display: none; }
+    /* Table header hidden — cards are self-labelled */
+    #a-tbody ~ thead,
+    table:has(#a-tbody) thead { display: none; }
+  }
+
+  @media (max-width: 380px) {
+    .soa-grid { grid-template-columns: 1fr; }
+    .soa-grid .k { border-bottom: none; padding-bottom: 2px; font-size: 11px; }
+    .soa-grid .v { padding-top: 2px; margin-bottom: 8px; }
+  }
 </style>
 </head>
 <body>
@@ -176,12 +260,31 @@
   <!-- Error -->
   <div id="error-box" style="display:none"></div>
 
+  <!-- Completion card (shown when scan finishes) -->
+  <div id="complete-card" style="display:none">
+    <div class="complete-banner">
+      <div class="complete-info">
+        <div class="complete-check">✓</div>
+        <div>
+          <div class="complete-title">Scan Complete</div>
+          <div class="complete-sub" id="complete-sub">0 live subdomains found</div>
+        </div>
+      </div>
+      <div class="complete-actions">
+        <button class="btn btn-dl" onclick="downloadCSV()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Download CSV
+        </button>
+        <button class="btn btn-dl btn-dl-secondary" onclick="downloadHTML()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Download HTML
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Final Report -->
   <div id="report">
-    <div class="toolbar">
-      <button class="btn btn-outline" onclick="downloadCSV()">Download CSV</button>
-      <button class="btn btn-outline" onclick="downloadHTML()">Download HTML Report</button>
-    </div>
 
     <!-- A Records -->
     <div class="report-section">
@@ -322,6 +425,13 @@ function finishScan() {
 
   buildReport();
   document.getElementById('report').style.display = 'block';
+
+  // Show completion card
+  const total = Object.keys(enrichedData).length;
+  document.getElementById('complete-sub').textContent =
+    `${total} live subdomain${total !== 1 ? 's' : ''} found for ${domain}`;
+  document.getElementById('complete-card').style.display = 'block';
+  document.getElementById('complete-card').scrollIntoView({behavior: 'smooth', block: 'nearest'});
 }
 
 // ── Build final report ─────────────────────────────────────────────────────────
@@ -337,14 +447,14 @@ function buildReport() {
     const services = buildServices(d.http, d.ssl);
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td><a href="https://${h(host)}" target="_blank">${h(host)}</a></td>
-      <td class="mono">${h(d.ip)}</td>
-      <td class="mono dim-text">${d.rdns && d.rdns !== d.ip ? h(d.rdns) : ''}</td>
-      <td>${d.asn ? `<span class="asn-badge">${h(d.asn)}</span>` : ''}</td>
-      <td>${h(d.org)}</td>
-      <td class="mono dim-text">${h(d.cidr)}</td>
-      <td>${h(d.country)}</td>
-      <td>${services}</td>`;
+      <td data-label="Host"><a href="https://${h(host)}" target="_blank">${h(host)}</a></td>
+      <td data-label="IP" class="mono">${h(d.ip)}</td>
+      <td data-label="rDNS" class="mono dim-text">${d.rdns && d.rdns !== d.ip ? h(d.rdns) : ''}</td>
+      <td data-label="ASN">${d.asn ? `<span class="asn-badge">${h(d.asn)}</span>` : ''}</td>
+      <td data-label="Organisation">${h(d.org)}</td>
+      <td data-label="CIDR" class="mono dim-text">${h(d.cidr)}</td>
+      <td data-label="Country">${h(d.country)}</td>
+      <td data-label="Services">${services}</td>`;
     aTbody.appendChild(tr);
   }
 
@@ -410,27 +520,99 @@ function buildServices(http, ssl) {
   return out;
 }
 
+// ── CSV helpers ────────────────────────────────────────────────────────────────
+function csvCell(v) {
+  // Properly escape a single CSV cell value
+  const s = String(v ?? '').replace(/"/g, '""');
+  return `"${s}"`;
+}
+function csvRow(arr)  { return arr.map(csvCell).join(','); }
+function csvHead(arr) { return arr.map(csvCell).join(','); }
+
 // ── Download CSV ───────────────────────────────────────────────────────────────
 function downloadCSV() {
-  const cols = ['host','ip','rdns','asn','org','cidr','country',
-                'http_server','http_title','https_server','https_title','ssl_cn','ssl_o'];
-  const rows = [cols.join(',')];
+  const lines = [];
+  const now = new Date().toLocaleString();
+
+  // ── Report header ──
+  lines.push(csvRow(['SUBDOMAIN RECON REPORT']));
+  lines.push(csvRow([`Target: ${domain}`]));
+  lines.push(csvRow([`Generated: ${now}`]));
+  lines.push('');
+
+  // ── A Records (Subdomains) ──
+  lines.push(csvRow(['=== A RECORDS (SUBDOMAINS) ===']));
+  lines.push(csvHead([
+    'Host', 'IP', 'Reverse DNS', 'ASN', 'Organisation', 'CIDR', 'Country',
+    'HTTP Server', 'HTTP Title', 'HTTP Technologies',
+    'HTTPS Server', 'HTTPS Title', 'HTTPS Technologies',
+    'HTTP 8080 Server', 'SSL Common Name', 'SSL Organisation'
+  ]));
+
   for (const host of Object.keys(enrichedData).sort()) {
-    const d = enrichedData[host];
-    const svc = (label, key) => (d.http?.[label]?.[key] || '').replace(/"/g,'""');
-    rows.push([
-      host, d.ip, d.rdns, d.asn, d.org, d.cidr, d.country,
-      svc('http','server'), svc('http','title'),
-      svc('https','server'), svc('https','title'),
-      d.ssl?.cn || '', d.ssl?.o || ''
-    ].map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
+    const d   = enrichedData[host];
+    const svc = (label, key) => d.http?.[label]?.[key] ?? '';
+    const tec = (label)      => (d.http?.[label]?.tech ?? []).join(' | ');
+    lines.push(csvRow([
+      host,
+      d.ip,
+      d.rdns !== d.ip ? d.rdns : '',
+      d.asn,
+      d.org,
+      d.cidr,
+      d.country,
+      svc('http',   'server'), svc('http',   'title'), tec('http'),
+      svc('https',  'server'), svc('https',  'title'), tec('https'),
+      svc('http8080','server'),
+      d.ssl?.cn ?? '',
+      d.ssl?.o  ?? '',
+    ]));
   }
-  download(`${domain}_subdomains.csv`, rows.join('\n'), 'text/csv');
+  lines.push('');
+
+  // ── MX Records ──
+  lines.push(csvRow(['=== MX RECORDS ===']));
+  lines.push(csvHead(['Priority', 'Host', 'IP', 'Reverse DNS', 'ASN', 'Organisation', 'CIDR', 'Country']));
+  for (const r of (dnsData.mx || [])) {
+    lines.push(csvRow([r.pref, r.host, r.ip, r.rdns !== r.ip ? r.rdns : '',
+                       r.asn, r.asn_name, r.cidr, r.country]));
+  }
+  lines.push('');
+
+  // ── NS Records ──
+  lines.push(csvRow(['=== NS RECORDS ===']));
+  lines.push(csvHead(['Host', 'IP', 'Reverse DNS', 'ASN', 'Organisation', 'CIDR', 'Country', 'SSH Banner']));
+  for (const r of (dnsData.ns || [])) {
+    lines.push(csvRow([r.host, r.ip, r.rdns !== r.ip ? r.rdns : '',
+                       r.asn, r.asn_name, r.cidr, r.country, r.ssh || '']));
+  }
+  lines.push('');
+
+  // ── TXT Records ──
+  lines.push(csvRow(['=== TXT RECORDS ===']));
+  lines.push(csvHead(['Value']));
+  for (const t of (dnsData.txt || [])) lines.push(csvCell(t));
+  lines.push('');
+
+  // ── SOA ──
+  const soa = dnsData.soa;
+  if (soa) {
+    lines.push(csvRow(['=== SOA RECORD ===']));
+    lines.push(csvHead(['Field', 'Value']));
+    lines.push(csvRow(['Primary NS',  soa.mname]));
+    lines.push(csvRow(['Hostmaster',  soa.rname]));
+    lines.push(csvRow(['Serial',      soa.serial]));
+    lines.push(csvRow(['Refresh (s)', soa.refresh]));
+    lines.push(csvRow(['Retry (s)',   soa.retry]));
+    lines.push(csvRow(['Expire (s)',  soa.expire]));
+  }
+
+  download(`${domain}_recon_report.csv`, lines.join('\r\n'), 'text/csv');
 }
 
 // ── Download HTML ──────────────────────────────────────────────────────────────
 function downloadHTML() {
-  download(`${domain}_report.html`, document.documentElement.outerHTML, 'text/html');
+  download(`${domain}_recon_report.html`, document.documentElement.outerHTML, 'text/html');
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -481,19 +663,26 @@ function showError(msg) {
 function reset() {
   enrichedData = {}; dnsData = {};
   document.getElementById('live-tbody').innerHTML = '';
-  document.getElementById('stat-found').textContent   = '0';
+  document.getElementById('stat-found').textContent    = '0';
   document.getElementById('stat-enriched').textContent = '0';
-  document.getElementById('feed-pulse').style.display = '';
-  document.querySelectorAll('.phase').forEach(el => {
-    el.classList.remove('active','done');
-  });
+  document.getElementById('feed-pulse').style.display  = '';
+  document.getElementById('complete-card').style.display = 'none';
+  document.querySelectorAll('.phase').forEach(el => el.classList.remove('active','done'));
 }
 
 function download(filename, content, mime) {
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([content], {type: mime}));
+  // UTF-8 BOM ensures Excel opens CSV correctly with special characters
+  const bom  = mime === 'text/csv' ? '\uFEFF' : '';
+  const blob = new Blob([bom + content], {type: `${mime};charset=utf-8;`});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
   a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);   // required for Firefox + mobile Safari
   a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 100);
 }
 
 // Allow Enter key to trigger scan
