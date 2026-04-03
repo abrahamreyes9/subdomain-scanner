@@ -505,9 +505,92 @@ def _detect_tech(headers: dict, body: str) -> list[str]:
     return found
 
 
+# ── Subdomain takeover fingerprints ───────────────────────────────────────────
+# Source: https://github.com/EdOverflow/can-i-take-over-xyz
+TAKEOVER_FINGERPRINTS: dict[str, list[str]] = {
+    "github.io":          ["There isn't a GitHub Pages site here", "For root URLs"],
+    "amazonaws.com":      ["NoSuchBucket", "The specified bucket does not exist"],
+    "s3.amazonaws.com":   ["NoSuchBucket", "The specified bucket does not exist"],
+    "heroku.com":         ["No such app", "herokucdn.com/error-pages/no-such-app"],
+    "herokussl.com":      ["No such app"],
+    "azurewebsites.net":  ["404 Web Site not found"],
+    "cloudapp.net":       ["404 Web Site not found"],
+    "trafficmanager.net": ["404 Web Site not found"],
+    "fastly.net":         ["Fastly error: unknown domain"],
+    "shopify.com":        ["Sorry, this shop is currently unavailable"],
+    "shopifypreview.com": ["Sorry, this shop is currently unavailable"],
+    "tumblr.com":         ["Whatever you were looking for doesn't currently exist"],
+    "wordpress.com":      ["Do you want to register"],
+    "ghost.io":           ["The thing you were looking for is no longer here"],
+    "surge.sh":           ["project not found"],
+    "statuspage.io":      ["Better Status Communication"],
+    "readme.io":          ["Project doesnt exist"],
+    "helpscout.com":      ["No settings were found for this company"],
+    "intercom.io":        ["Uh oh. That page doesn't exist"],
+    "uservoice.com":      ["This UserVoice subdomain is currently available"],
+    "zendesk.com":        ["Help Center Closed"],
+    "unbounce.com":       ["The requested URL was not found on this server"],
+    "launchrock.com":     ["It looks like you may have taken a wrong turn"],
+    "sendgrid.net":       ["The requested URL was not found"],
+    "webflow.io":         ["The page you are looking for doesn't exist"],
+    "pantheonsite.io":    ["The gods are wise"],
+    "cargo.site":         ["If you're moving your domain away from Cargo"],
+    "freshdesk.com":      ["There is no helpdesk here with that URL"],
+    "teamwork.com":       ["Oops - We didn't find your site"],
+}
+
+SCAN_PORTS = [21, 22, 23, 25, 53, 80, 443, 445, 3306, 3389, 5432, 5900, 6379,
+              8080, 8443, 8888, 9200, 27017]
+
+
+def check_ports(ip: str, timeout: float = 1.5) -> list[int]:
+    """TCP connect scan against common ports. Returns list of open ports."""
+    def _try(port: int) -> int | None:
+        try:
+            with socket.create_connection((ip, port), timeout=timeout):
+                return port
+        except Exception:
+            return None
+    with ThreadPoolExecutor(max_workers=len(SCAN_PORTS)) as ex:
+        return sorted(p for p in ex.map(_try, SCAN_PORTS) if p)
+
+
+def check_takeover(host: str) -> dict | None:
+    """Check if a subdomain CNAME points to an unclaimed service."""
+    try:
+        resolver = dns.resolver.Resolver()
+        resolver.timeout = 3
+        resolver.lifetime = 3
+        try:
+            answers = resolver.resolve(host, "CNAME")
+            cname   = str(answers[0].target).rstrip(".").lower()
+        except Exception:
+            return None
+
+        matched = next((svc for svc in TAKEOVER_FINGERPRINTS if svc in cname), None)
+        if not matched:
+            return None
+
+        fingerprints = TAKEOVER_FINGERPRINTS[matched]
+        for scheme in ("https", "http"):
+            try:
+                r    = requests.get(f"{scheme}://{host}", timeout=5, verify=False,
+                                    allow_redirects=True)
+                body = r.text[:8000].lower()
+                hit  = next((fp for fp in fingerprints if fp.lower() in body), None)
+                if hit:
+                    return {"cname": cname, "service": matched,
+                            "status": r.status_code, "fingerprint": hit}
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
+
+
 def _probe_one(session: requests.Session, scheme: str, port: int,
                host: str, timeout: float) -> tuple[str, dict | None]:
-    """Probe a single scheme/port, return (label, entry) or (label, None)."""
+    """Probe a single scheme/port — captures status code and redirect chain."""
     label = scheme if port in (80, 443) else f"{scheme}{port}"
     url   = f"{scheme}://{host}" if port in (80, 443) else f"{scheme}://{host}:{port}"
     hdrs  = {"User-Agent": "Mozilla/5.0"}
@@ -517,14 +600,24 @@ def _probe_one(session: requests.Session, scheme: str, port: int,
         server = r.headers.get("server", "unknown server")
         title  = _get_title(r.text)
         tech   = _detect_tech(dict(r.headers), r.text)
-        entry: dict = {"server": server}
-        if title:
-            entry["title"] = title[:80]
-        if tech:
-            entry["tech"] = tech
+
+        # Build redirect chain from requests history
+        chain = [{"url": str(step.url), "status": step.status_code}
+                 for step in r.history]
+        if chain:
+            chain.append({"url": str(r.url), "status": r.status_code})
+
+        entry: dict = {
+            "status": r.history[0].status_code if r.history else r.status_code,
+            "final_status": r.status_code,
+            "server": server,
+        }
+        if title:              entry["title"]    = title[:80]
+        if tech:               entry["tech"]     = tech
+        if chain:              entry["redirects"] = chain
         return label, entry
     except requests.exceptions.SSLError:
-        return label, {"server": "ssl-error"}
+        return label, {"status": 0, "final_status": 0, "server": "ssl-error"}
     except Exception:
         return label, None
 
@@ -574,18 +667,22 @@ def collect_enrichment(resolved: dict[str, str], threads: int = 100) -> dict[str
     enriched: dict[str, dict] = {host: {"ip": ip} for host, ip in items}
 
     with ThreadPoolExecutor(max_workers=threads) as ex:
-        f_info = {host: ex.submit(get_ip_info,        ip)   for host, ip in items}
-        f_http = {host: ex.submit(probe_http,          host) for host, _ in items}
-        f_ssl  = {host: ex.submit(get_ssl_cert_info,   host) for host, _ in items}
-        f_rdns = {host: ex.submit(reverse_dns,         ip)   for host, ip in items}
+        f_info     = {host: ex.submit(get_ip_info,      ip)   for host, ip in items}
+        f_http     = {host: ex.submit(probe_http,        host) for host, _ in items}
+        f_ssl      = {host: ex.submit(get_ssl_cert_info, host) for host, _ in items}
+        f_rdns     = {host: ex.submit(reverse_dns,       ip)   for host, ip in items}
+        f_ports    = {host: ex.submit(check_ports,       ip)   for host, ip in items}
+        f_takeover = {host: ex.submit(check_takeover,    host) for host, _ in items}
 
     for host, ip in items:
         enriched[host] = {
-            "ip":   ip,
-            "info": f_info[host].result(),
-            "http": f_http[host].result(),
-            "ssl":  f_ssl[host].result(),
-            "rdns": f_rdns[host].result(),
+            "ip":       ip,
+            "info":     f_info[host].result(),
+            "http":     f_http[host].result(),
+            "ssl":      f_ssl[host].result(),
+            "rdns":     f_rdns[host].result(),
+            "ports":    f_ports[host].result(),
+            "takeover": f_takeover[host].result(),
         }
     return enriched
 

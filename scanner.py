@@ -102,16 +102,18 @@ def run_scan(domain: str, q: queue.Queue) -> None:
             info      = data.get("info", {})
             asn, org  = _parse_org(info)
             emit({
-                "type":    "enriched",
-                "host":    host,
-                "ip":      data.get("ip", ""),
-                "rdns":    data.get("rdns", ""),
-                "asn":     asn,
-                "org":     org,
-                "cidr":    info.get("network", ""),
-                "country": info.get("country", ""),
-                "http":    data.get("http", {}),
-                "ssl":     data.get("ssl", {}),
+                "type":     "enriched",
+                "host":     host,
+                "ip":       data.get("ip", ""),
+                "rdns":     data.get("rdns", ""),
+                "asn":      asn,
+                "org":      org,
+                "cidr":     info.get("network", ""),
+                "country":  info.get("country", ""),
+                "http":     data.get("http", {}),
+                "ssl":      data.get("ssl", {}),
+                "ports":    data.get("ports", []),
+                "takeover": data.get("takeover"),
             })
 
         # ── Phase 6: DNS records ──────────────────────────────────────────────
