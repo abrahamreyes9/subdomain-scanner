@@ -4,3 +4,4 @@ requests
 dnspython
 urllib3
 python-multipart
+python-whois

@@ -49,15 +49,24 @@
 
   /* ── Progress ── */
   #progress { display: none; margin-bottom: 32px; }
-  .phase-bar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .phase-bar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
   .phase { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;
            border: 1px solid var(--border); color: var(--dim); transition: all .3s; }
   .phase.active { border-color: var(--accent); color: var(--accent);
                   background: rgba(99,102,241,.1); }
   .phase.done   { border-color: var(--green); color: var(--green);
                   background: rgba(16,185,129,.08); }
-  .status-line { color: var(--dim); font-size: 12px; font-family: monospace;
-                 min-height: 18px; }
+  .activity-log { background: rgba(0,0,0,.25); border: 1px solid var(--border);
+                  border-radius: 6px; padding: 8px 12px; height: 140px;
+                  overflow-y: auto; margin-bottom: 10px; }
+  .log-entry { font-size: 11px; font-family: monospace; line-height: 1.65; }
+  .log-entry.log-phase  { color: var(--accent); font-weight: 600; }
+  .log-entry.log-status { color: var(--dim); }
+  .log-entry.log-found  { color: var(--green); }
+  .progress-wrap { margin: 4px 0 10px; }
+  .progress-bar  { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--accent); transition: width .2s; width: 0%; }
+  .progress-label { font-size: 11px; font-family: monospace; color: var(--dim); margin-top: 3px; }
   .stats-row { display: flex; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
   .stat { background: var(--surface); border: 1px solid var(--border);
           border-radius: 8px; padding: 12px 20px; }
@@ -261,6 +270,7 @@
   <!-- Progress -->
   <div id="progress">
     <div class="phase-bar">
+      <div class="phase" id="ph-whois">WHOIS</div>
       <div class="phase" id="ph-dns">DNS</div>
       <div class="phase" id="ph-passive">Passive</div>
       <div class="phase" id="ph-brute">Brute-force</div>
@@ -268,7 +278,11 @@
       <div class="phase" id="ph-enrich">Enrich</div>
       <div class="phase" id="ph-dns_records">DNS Records</div>
     </div>
-    <div class="status-line" id="status-line">Starting...</div>
+    <div class="activity-log" id="activity-log"></div>
+    <div class="progress-wrap" id="scan-progress-wrap" style="display:none">
+      <div class="progress-bar"><div class="progress-fill" id="scan-progress-fill"></div></div>
+      <div class="progress-label" id="scan-progress-label"></div>
+    </div>
     <div class="stats-row">
       <div class="stat"><div class="num" id="stat-found">0</div><div class="lbl">Subdomains Found</div></div>
       <div class="stat"><div class="num" id="stat-enriched">0</div><div class="lbl">Enriched</div></div>
@@ -383,6 +397,7 @@
 // ── State ──────────────────────────────────────────────────────────────────────
 let enrichedData = {};   // host → enriched event
 let dnsData      = {};
+let whoisData    = {};
 let domain       = '';
 let es           = null;
 
@@ -423,11 +438,21 @@ function handleEvent(e) {
 
   if (ev.type === 'phase') {
     setPhase(ev.phase);
-    setStatus(ev.message);
+    logEntry(ev.message, 'log-phase');
+    hideScanProgress();
   }
 
   else if (ev.type === 'status') {
-    setStatus(ev.message);
+    logEntry(ev.message, 'log-status');
+  }
+
+  else if (ev.type === 'progress') {
+    const pct = Math.round((ev.done / ev.total) * 100);
+    showScanProgress(`${ev.phase === 'brute' ? 'Brute-force' : 'Resolve'}: ${ev.done}/${ev.total} checked — ${ev.found} live`, pct);
+  }
+
+  else if (ev.type === 'whois') {
+    whoisData = ev.data;
   }
 
   else if (ev.type === 'subdomain') {
@@ -459,10 +484,11 @@ function finishScan() {
   if (es) { es.close(); es = null; }
   document.getElementById('scan-btn').disabled = false;
   document.getElementById('feed-pulse').style.display = 'none';
-  setStatus('Scan complete.');
+  logEntry('Scan complete.', 'log-found');
+  hideScanProgress();
 
   // Mark all phases done
-  ['dns','passive','brute','resolve','enrich','dns_records'].forEach(markPhaseDone);
+  ['whois','dns','passive','brute','resolve','enrich','dns_records'].forEach(markPhaseDone);
 
   buildReport();
   document.getElementById('report').style.display = 'block';
@@ -805,8 +831,7 @@ function setPhase(phase) {
   document.querySelectorAll('.phase').forEach(el => {
     if (el.id === `ph-${phase}`) el.classList.add('active');
   });
-  // Mark previous phases done based on order
-  const order = ['dns','passive','brute','resolve','enrich','dns_records'];
+  const order = ['whois','dns','passive','brute','resolve','enrich','dns_records'];
   const idx = order.indexOf(phase);
   order.slice(0, idx).forEach(markPhaseDone);
 }
@@ -816,8 +841,23 @@ function markPhaseDone(phase) {
   if (el) { el.classList.remove('active'); el.classList.add('done'); }
 }
 
-function setStatus(msg) {
-  document.getElementById('status-line').textContent = msg;
+function logEntry(msg, cls = 'log-status') {
+  const log = document.getElementById('activity-log');
+  const div = document.createElement('div');
+  div.className = `log-entry ${cls}`;
+  div.textContent = msg;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function showScanProgress(label, pct) {
+  document.getElementById('scan-progress-wrap').style.display = '';
+  document.getElementById('scan-progress-fill').style.width = pct + '%';
+  document.getElementById('scan-progress-label').textContent = label;
+}
+
+function hideScanProgress() {
+  document.getElementById('scan-progress-wrap').style.display = 'none';
 }
 
 function inc(id) {
@@ -832,12 +872,14 @@ function showError(msg) {
 }
 
 function reset() {
-  enrichedData = {}; dnsData = {};
-  document.getElementById('live-tbody').innerHTML = '';
+  enrichedData = {}; dnsData = {}; whoisData = {};
+  document.getElementById('live-tbody').innerHTML   = '';
+  document.getElementById('activity-log').innerHTML = '';
   document.getElementById('stat-found').textContent    = '0';
   document.getElementById('stat-enriched').textContent = '0';
   document.getElementById('feed-pulse').style.display  = '';
   document.getElementById('complete-card').style.display = 'none';
+  hideScanProgress();
   document.querySelectorAll('.phase').forEach(el => el.classList.remove('active','done'));
 }
 

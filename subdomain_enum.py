@@ -185,6 +185,26 @@ def fetch_hackertarget(domain: str) -> set[str]:
         return set()
 
 
+def fetch_whois(domain: str) -> dict:
+    """Return WHOIS registration data for a domain."""
+    try:
+        import whois
+        w = whois.whois(domain)
+        def _str(v):
+            if isinstance(v, list): v = v[0]
+            return str(v).split("T")[0] if v else ""
+        return {
+            "registrar":     w.registrar or "",
+            "creation_date": _str(w.creation_date),
+            "expiry_date":   _str(w.expiration_date),
+            "updated_date":  _str(w.updated_date),
+            "name_servers":  sorted({ns.lower().rstrip(".") for ns in (w.name_servers or [])}),
+            "status":        (w.status if isinstance(w.status, list) else [w.status]) if w.status else [],
+        }
+    except Exception:
+        return {}
+
+
 # ── active DNS brute-force ─────────────────────────────────────────────────────
 
 COMMON_SUBDOMAINS = [
