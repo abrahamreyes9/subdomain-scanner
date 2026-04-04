@@ -14,6 +14,9 @@ import ssl
 import json
 import time
 import threading
+import subprocess
+import shutil
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -459,6 +462,81 @@ def get_shodan_internetdb(ip: str, timeout: float = 3.0) -> dict:
         return {}
 
 
+# ── Lightweight port scanning ─────────────────────────────────────────────────
+
+def nmap_scan_ips(ips: list[str], top_ports: int = 20, timeout: int = 30) -> dict[str, list[int]]:
+    """Run a single nmap TCP-connect scan against multiple IPs.
+
+    Returns {ip: [sorted open ports]}.  Returns {} if nmap is not installed
+    or the scan fails for any reason.
+    """
+    if not ips:
+        return {}
+    nmap_path = shutil.which("nmap")
+    if not nmap_path:
+        return {}
+    cmd = [
+        nmap_path,
+        "-sT",                          # TCP connect (no root needed)
+        "--top-ports", str(top_ports),
+        "-T4",                           # aggressive timing
+        "--open",                        # only open ports
+        "-oX", "-",                      # XML to stdout
+        "--noninteractive",
+    ] + ips
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode not in (0, 1):   # 1 = some hosts down, still valid
+            return {}
+        return _parse_nmap_xml(result.stdout)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return {}
+
+
+def _parse_nmap_xml(xml_str: str) -> dict[str, list[int]]:
+    """Parse nmap -oX output into {ip: [open_port_numbers]}."""
+    result: dict[str, list[int]] = {}
+    try:
+        root = ET.fromstring(xml_str)
+        for host_el in root.findall("host"):
+            addr_el = host_el.find("address[@addrtype='ipv4']")
+            if addr_el is None:
+                continue
+            ip = addr_el.get("addr", "")
+            ports = []
+            ports_el = host_el.find("ports")
+            if ports_el is not None:
+                for port_el in ports_el.findall("port"):
+                    state_el = port_el.find("state")
+                    if state_el is not None and state_el.get("state") == "open":
+                        try:
+                            ports.append(int(port_el.get("portid", 0)))
+                        except ValueError:
+                            continue
+            if ports:
+                result[ip] = sorted(ports)
+    except ET.ParseError:
+        pass
+    return result
+
+
+_COMMON_PORTS = (21, 22, 23, 25, 53, 80, 110, 143, 443, 445,
+                 993, 995, 1433, 3306, 3389, 5432, 5900, 8080, 8443, 27017)
+
+
+def _socket_scan_ip(ip: str, ports: tuple[int, ...] = _COMMON_PORTS,
+                    timeout: float = 0.5) -> list[int]:
+    """Quick TCP-connect scan using raw sockets (fallback when nmap is absent)."""
+    open_ports = []
+    for port in ports:
+        try:
+            with socket.create_connection((ip, port), timeout=timeout):
+                open_ports.append(port)
+        except (OSError, socket.timeout):
+            continue
+    return sorted(open_ports)
+
+
 def check_ssh(ip: str, timeout: float = 1.5) -> str:
     """Try to grab SSH banner from port 22."""
     try:
@@ -690,17 +768,26 @@ def collect_enrichment(
     do_ssl: bool = True,
     do_rdns: bool = True,
     do_shodan: bool = True,
+    do_ports: bool = True,
+    nmap_top_ports: int = 20,
     enrich_limit: int = 0,
 ) -> dict[str, dict]:
     """Enrich all resolved hosts using a single flat thread pool.
 
     All sub-tasks (IP info, HTTP probe, SSL cert, rDNS) for every host are
     submitted directly — no nested executors, no per-host pool spin-up.
+    Port scanning (nmap or socket fallback) runs in parallel with them.
     """
     items = sorted(resolved.items())
     if enrich_limit > 0:
         items = items[:enrich_limit]
     enriched: dict[str, dict] = {}
+
+    # Kick off nmap in a background thread so it overlaps with enrichment
+    unique_ips = list({ip for _, ip in items})
+    nmap_executor = ThreadPoolExecutor(max_workers=1) if do_ports else None
+    nmap_future = (nmap_executor.submit(nmap_scan_ips, unique_ips, nmap_top_ports)
+                   if nmap_executor else None)
 
     with ThreadPoolExecutor(max_workers=threads) as ex:
         f_info = {host: ex.submit(get_ip_info,        ip)   for host, ip in items}
@@ -713,15 +800,40 @@ def collect_enrichment(
         f_shodan = ({host: ex.submit(get_shodan_internetdb, ip, shodan_timeout) for host, ip in items}
                     if do_shodan else {})
 
+        # Collect nmap results (blocks only if nmap is slower than enrichment)
+        nmap_results: dict[str, list[int]] = {}
+        if nmap_future:
+            try:
+                nmap_results = nmap_future.result(timeout=35)
+            except Exception:
+                nmap_results = {}
+            nmap_executor.shutdown(wait=False)
+
+        # Socket fallback if nmap unavailable and returned nothing
+        if do_ports and not nmap_results and not shutil.which("nmap"):
+            sock_futures = {ip: ex.submit(_socket_scan_ip, ip) for ip in unique_ips}
+            for ip, fut in sock_futures.items():
+                try:
+                    ports = fut.result()
+                    if ports:
+                        nmap_results[ip] = ports
+                except Exception:
+                    continue
+
         # Collect results inside the context so futures are guaranteed complete
         for host, ip in items:
+            shodan_data = f_shodan[host].result() if do_shodan else {}
+            ports = nmap_results.get(ip, [])
+            if not ports and shodan_data.get("ports"):
+                ports = shodan_data["ports"]
             enriched[host] = {
                 "ip":   ip,
                 "info": f_info[host].result(),
                 "http": f_http[host].result() if do_http else {},
                 "ssl":  f_ssl[host].result() if do_ssl else {},
                 "rdns": f_rdns[host].result() if do_rdns else "",
-                "shodan": f_shodan[host].result() if do_shodan else {},
+                "shodan": shodan_data,
+                "ports": ports,
             }
     return enriched
 

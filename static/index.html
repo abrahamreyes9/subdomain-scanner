@@ -578,7 +578,7 @@ function buildReport() {
   for (const host of hosts) {
     const d        = enrichedData[host];
     const services = buildServices(d.http, d.ssl);
-    const ports    = buildPorts(d.ports || []);
+    const ports    = buildPorts(d.ports?.length ? d.ports : (d.shodan?.ports || []));
 
     // Takeover warning
     if (d.takeover) {
@@ -739,8 +739,9 @@ function downloadTXT() {
       L.push(`  CIDR    : ${d.cidr}`);
     if (d.country)
       L.push(`  Country : ${d.country}`);
-    if (d.ports?.length)
-      L.push(`  Ports   : ${d.ports.join(', ')}`);
+    const allPorts = d.ports?.length ? d.ports : (d.shodan?.ports || []);
+    if (allPorts.length)
+      L.push(`  Ports   : ${allPorts.join(', ')}`);
 
     for (const [label, svc] of Object.entries(d.http || {})) {
       const status = svc.final_status || svc.status || '';

@@ -158,7 +158,7 @@ def run_scan(domain: str, q: queue.Queue,
         # ── Phase 5: Enrich ───────────────────────────────────────────────────
         emit({"type": "phase", "phase": "enrich",
               "message": f"Enriching {len(resolved)} live subdomains..."})
-        emit({"type": "status", "message": "Running HTTP probe, IP info, SSL cert, rDNS, port scan, takeover check..."})
+        emit({"type": "status", "message": "Running HTTP probe, IP info, SSL cert, rDNS, nmap port scan, takeover check..."})
         
         # Using optimized enrichment with shared connection pool
         enriched = collect_enrichment(resolved, threads=enrich_threads)
