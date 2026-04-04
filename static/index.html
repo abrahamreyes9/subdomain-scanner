@@ -136,10 +136,20 @@
   .badge-brute   { background:#1e1b4b; color:#a5b4fc; }
   .badge-passive { background:#0c2a1a; color:#6ee7b7; }
   .badge-axfr    { background:#451a03; color:#fbbf24; }
+  .badge-cf      { background:#F48120; color:#fff; font-weight:700; }
   .cert-critical { background: rgba(239,68,68,.15);  color: var(--red);   border: 1px solid var(--red); }
   .cert-high     { background: rgba(245,158,11,.12); color: var(--amber); border: 1px solid var(--amber); }
   .cert-medium   { background: rgba(234,179,8,.12);  color: #eab308;      border: 1px solid #eab308; }
   .cert-low      { background: rgba(56,189,248,.10); color: var(--blue);  border: 1px solid var(--blue); }
+  .risk-critical { background: rgba(239,68,68,.15);  color: var(--red);   border: 1px solid var(--red);   border-radius:5px; padding:2px 8px; font-size:11px; font-weight:600; }
+  .risk-high     { background: rgba(245,158,11,.12); color: var(--amber); border: 1px solid var(--amber); border-radius:5px; padding:2px 8px; font-size:11px; font-weight:600; }
+  .risk-medium   { background: rgba(234,179,8,.12);  color: #eab308;      border: 1px solid #eab308;      border-radius:5px; padding:2px 8px; font-size:11px; font-weight:600; }
+  .risk-secure   { background: rgba(16,185,129,.12); color: #10b981;      border: 1px solid #10b981;      border-radius:5px; padding:2px 8px; font-size:11px; font-weight:600; }
+  .email-sec-grid { display:grid; grid-template-columns:120px 1fr; gap:6px 16px; font-size:13px; }
+  .email-sec-grid .k { color: var(--muted); font-size:12px; }
+  .email-sec-grid .v { word-break:break-all; font-family:'JetBrains Mono',monospace; font-size:12px; }
+  .sans-toggle { cursor:pointer; color:var(--blue); font-size:11px; margin-left:4px; }
+  .sans-list { display:none; margin-top:4px; font-size:11px; font-family:'JetBrains Mono',monospace; color:var(--muted); }
   .asn-badge { background: #1e293b; color: var(--amber); font-family: 'JetBrains Mono', monospace;
                font-size: 11px; padding: 2px 7px; border-radius: 5px; }
   html.light .asn-badge { background: #fef3c7; color: #92400e; }
@@ -396,7 +406,7 @@
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th>Host</th><th>IP</th><th>rDNS</th>
+            <th>Host</th><th>IP</th><th>CF</th><th>rDNS</th>
             <th>ASN</th><th>Organisation</th><th>CIDR</th><th>Country</th>
             <th>Open Ports</th><th>Services</th>
           </tr></thead>
@@ -437,6 +447,12 @@
     <div class="report-section">
       <h2>SOA Record</h2>
       <div id="soa-container"></div>
+    </div>
+
+    <!-- Email Security (DMARC + SPF) -->
+    <div class="report-section">
+      <h2>Email Security</h2>
+      <div id="email-sec-container"><p class="dim-text">Waiting for scan…</p></div>
     </div>
   </div>
 
@@ -533,6 +549,12 @@ function handleEvent(e) {
 
   else if (ev.type === 'dns') {
     dnsData = ev.data;
+    if (dnsData.dmarc?.missing) {
+      logEntry('⚠ DMARC record missing — domain may be spoofable for phishing', 'log-status');
+    }
+    if (dnsData.spf?.risk === 'CRITICAL') {
+      logEntry(`⚠ SPF policy "${dnsData.spf.policy}" allows anyone to send email as this domain`, 'log-status');
+    }
   }
 
   else if (ev.type === 'warning') {
@@ -607,6 +629,7 @@ function buildReport() {
     tr.innerHTML = `
       <td data-label="Host"><a href="https://${h(host)}" target="_blank">${h(host)}</a>${d.takeover ? ' <span style="color:var(--red);font-size:11px">⚠ takeover</span>' : ''}</td>
       <td data-label="IP" class="mono">${h(d.ip)}</td>
+      <td data-label="CF">${d.cloudflare ? '<span class="badge badge-cf" title="Behind Cloudflare">CF</span>' : ''}</td>
       <td data-label="rDNS" class="mono dim-text">${d.rdns && d.rdns !== d.ip ? h(d.rdns) : ''}</td>
       <td data-label="ASN">${d.asn ? `<span class="asn-badge">${h(d.asn)}</span>` : ''}</td>
       <td data-label="Organisation">${h(d.org)}</td>
@@ -668,6 +691,51 @@ function buildReport() {
   } else {
     soaEl.innerHTML = '<p class="dim-text">None</p>';
   }
+
+  // Email Security — DMARC + SPF (zero extra scan time: data already in dnsData)
+  const emailEl = document.getElementById('email-sec-container');
+  emailEl.innerHTML = buildEmailSecurity(dnsData.dmarc, dnsData.spf);
+}
+
+function riskBadge(risk) {
+  if (!risk) return '';
+  const cls = {CRITICAL:'risk-critical', HIGH:'risk-high', MEDIUM:'risk-medium', SECURE:'risk-secure'}[risk] || '';
+  return `<span class="${cls}">${h(risk)}</span>`;
+}
+
+function buildEmailSecurity(dmarc, spf) {
+  let out = '<div class="email-sec-grid">';
+
+  // DMARC
+  out += `<div class="k">DMARC</div><div class="v">`;
+  if (!dmarc || Object.keys(dmarc).length === 0) {
+    out += `${riskBadge('CRITICAL')} <span class="dim-text">No data</span>`;
+  } else if (dmarc.missing) {
+    out += `${riskBadge('CRITICAL')} <span class="dim-text">Record missing — domain is spoofable</span>`;
+  } else {
+    out += `${riskBadge(dmarc.risk)} <span class="dim-text">p=${h(dmarc.policy)}`;
+    if (dmarc.pct !== undefined && dmarc.pct !== 100) out += ` pct=${h(dmarc.pct)}%`;
+    if (dmarc.rua) out += ` rua=${h(dmarc.rua)}`;
+    out += `</span><br><span class="mono" style="font-size:11px;color:var(--muted)">${h(dmarc.record||'')}</span>`;
+  }
+  out += `</div>`;
+
+  // SPF
+  out += `<div class="k">SPF</div><div class="v">`;
+  if (!spf || Object.keys(spf).length === 0) {
+    out += `${riskBadge('HIGH')} <span class="dim-text">No data</span>`;
+  } else if (spf.missing) {
+    out += `${riskBadge('HIGH')} <span class="dim-text">Record missing</span>`;
+  } else {
+    out += `${riskBadge(spf.risk)} <span class="dim-text">all=${h(spf.policy)}</span>`;
+    if (spf.includes?.length) out += `<br><span class="dim-text" style="font-size:11px">includes: ${spf.includes.map(h).join(', ')}</span>`;
+    if (spf.ip4?.length)      out += `<br><span class="dim-text" style="font-size:11px">ip4: ${spf.ip4.map(h).join(', ')}</span>`;
+    out += `<br><span class="mono" style="font-size:11px;color:var(--muted)">${h(spf.record||'')}</span>`;
+  }
+  out += `</div>`;
+
+  out += '</div>';
+  return out;
 }
 
 function statusBadge(code) {
@@ -700,6 +768,11 @@ function buildServices(http, ssl) {
     out += `<div style="margin-top:2px"><span class="badge ${alertCls}">${label}</span>`;
     if (!ssl.alert_label) out += ` <span class="dim-text" style="font-size:11px">(${ssl.days_remaining}d)</span>`;
     out += `</div>`;
+  }
+  if (ssl?.sans?.length) {
+    const id = 'sans-' + Math.random().toString(36).slice(2);
+    out += `<div style="margin-top:2px"><span class="sans-toggle" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'block':'none'">+${ssl.sans.length} SANs ▾</span>` +
+           `<div id="${id}" class="sans-list">${ssl.sans.map(s=>h(s)).join('<br>')}</div></div>`;
   }
   return out;
 }

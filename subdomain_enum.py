@@ -17,6 +17,7 @@ import threading
 import subprocess
 import shutil
 import itertools
+import ipaddress
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -41,6 +42,23 @@ try:
 except ImportError:
     WHOIS_AVAILABLE = False
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# ── Cloudflare IPv4 CIDR ranges (published at cloudflare.com/ips) ────────────
+_CF_NETWORKS = [ipaddress.ip_network(c) for c in [
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+]]
+
+
+def is_cloudflare_ip(ip: str) -> bool:
+    """Return True if *ip* belongs to a known Cloudflare network."""
+    try:
+        addr = ipaddress.ip_address(ip)
+        return any(addr in net for net in _CF_NETWORKS)
+    except ValueError:
+        return False
 
 # ── shared HTTP session with connection pooling ──────────────────────────────
 _http_session = requests.Session()
@@ -926,6 +944,10 @@ def get_ssl_cert_info(host: str, timeout: float = 3.0) -> dict:
                 elif days_remaining <= 180:
                     result["expiry_alert"] = "LOW"
                     result["alert_label"]  = "EXPIRES IN 180 DAYS"
+            # Extract Subject Alternative Names — already in the cert dict, no extra call
+            sans = [name for typ, name in cert.get("subjectAltName", ()) if typ == "DNS"]
+            if sans:
+                result["sans"] = sans
             return result
     except Exception:
         return {}
@@ -1000,13 +1022,14 @@ def collect_enrichment(
             if not ports and shodan_data.get("ports"):
                 ports = shodan_data["ports"]
             enriched[host] = {
-                "ip":   ip,
-                "info": f_info[host].result(),
-                "http": f_http[host].result() if do_http else {},
-                "ssl":  f_ssl[host].result() if do_ssl else {},
-                "rdns": f_rdns[host].result() if do_rdns else "",
-                "shodan": shodan_data,
-                "ports": ports,
+                "ip":         ip,
+                "info":       f_info[host].result(),
+                "http":       f_http[host].result() if do_http else {},
+                "ssl":        f_ssl[host].result() if do_ssl else {},
+                "rdns":       f_rdns[host].result() if do_rdns else "",
+                "shodan":     shodan_data,
+                "ports":      ports,
+                "cloudflare": is_cloudflare_ip(ip),
             }
     return enriched
 
@@ -1172,16 +1195,79 @@ def _collect_txt_soa_records(domain: str, resolver: dns.resolver.Resolver) -> tu
     return txt_data, soa_data
 
 
-def collect_dns_records(domain: str) -> dict:
-    """Collect MX, NS, TXT, SOA records and enrich with IP info."""
+def fetch_dmarc(domain: str) -> dict:
+    """Query _dmarc.{domain} TXT and parse the DMARC policy. Zero scan-time cost
+    when called in parallel with other DNS queries."""
     resolver = _get_resolver()
+    try:
+        answers = resolver.resolve(f"_dmarc.{domain}", "TXT")
+        record = b"".join(answers[0].strings).decode(errors="ignore")
+        if not record.startswith("v=DMARC1"):
+            return {"missing": True, "risk": "CRITICAL"}
+        tags: dict[str, str] = {}
+        for part in record.split(";"):
+            part = part.strip()
+            if "=" in part:
+                k, _, v = part.partition("=")
+                tags[k.strip()] = v.strip()
+        policy = tags.get("p", "none").lower()
+        risk = {"none": "HIGH", "quarantine": "MEDIUM", "reject": "SECURE"}.get(policy, "HIGH")
+        return {
+            "record": record,
+            "policy": policy,
+            "rua": tags.get("rua", ""),
+            "pct": int(tags.get("pct", 100)),
+            "risk": risk,
+        }
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        return {"missing": True, "risk": "CRITICAL"}
+    except Exception:
+        return {}
 
-    txt_data, soa_data = _collect_txt_soa_records(domain, resolver)
+
+def analyze_spf(txt_records: list[str]) -> dict:
+    """Parse the SPF record from already-fetched TXT records. No network calls."""
+    spf = next((r for r in txt_records if r.startswith("v=spf1")), None)
+    if not spf:
+        return {"missing": True, "risk": "HIGH"}
+    parts = spf.split()
+    all_mechanism = next((p for p in parts if p.endswith("all")), None)
+    risk_map = {
+        "+all": "CRITICAL", "all": "CRITICAL", "?all": "HIGH",
+        "~all": "MEDIUM",   "-all": "SECURE",
+    }
+    risk = risk_map.get(all_mechanism, "HIGH") if all_mechanism else "HIGH"
     return {
-        "mx": _collect_mx_records(domain, resolver),
-        "ns": _collect_ns_records(domain, resolver),
-        "txt": txt_data,
-        "soa": soa_data,
+        "record":   spf,
+        "policy":   all_mechanism or "missing",
+        "risk":     risk,
+        "includes": [p[len("include:"):] for p in parts if p.startswith("include:")],
+        "ip4":      [p[len("ip4:"):] for p in parts if p.startswith("ip4:")],
+        "ip6":      [p[len("ip6:"):] for p in parts if p.startswith("ip6:")],
+    }
+
+
+def collect_dns_records(domain: str) -> dict:
+    """Collect MX, NS, TXT, SOA, DMARC, and SPF records.
+
+    MX, NS, TXT/SOA, and DMARC queries run in parallel so DMARC adds
+    zero wall-clock time to the scan.
+    """
+    resolver = _get_resolver()
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        f_txt_soa = ex.submit(_collect_txt_soa_records, domain, resolver)
+        f_mx      = ex.submit(_collect_mx_records,      domain, resolver)
+        f_ns      = ex.submit(_collect_ns_records,      domain, resolver)
+        f_dmarc   = ex.submit(fetch_dmarc,              domain)
+
+    txt_data, soa_data = f_txt_soa.result()
+    return {
+        "mx":    f_mx.result(),
+        "ns":    f_ns.result(),
+        "txt":   txt_data,
+        "soa":   soa_data,
+        "dmarc": f_dmarc.result(),
+        "spf":   analyze_spf(txt_data),
     }
 
 
