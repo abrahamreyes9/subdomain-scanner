@@ -1,6 +1,9 @@
 """
 scanner.py — runs subdomain enumeration in a background thread,
 emitting structured events into a queue for the SSE stream.
+
+V2: integrated Config, ScanContext, Wayback Machine, permutation engine,
+    token-bucket DNS rate limiting, and cancellation support.
 """
 
 import queue
@@ -11,9 +14,14 @@ except ImportError:
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
+from config import Config
+from context import ScanContext
+from utils import init_dns_bucket
+
 from subdomain_enum import (
     fetch_crtsh,
     fetch_hackertarget,
+    fetch_wayback,
     fetch_whois,
     get_nameservers,
     attempt_zone_transfer,
@@ -21,27 +29,40 @@ from subdomain_enum import (
     resolve,
     collect_enrichment,
     collect_dns_records,
+    detect_wildcard,
+    generate_permutations,
     COMMON_SUBDOMAINS,
     _parse_org,
 )
 
 
-def _safe_result(future: Future, source: str, emit) -> set:
+def _safe_result(future: Future, source: str, ctx: ScanContext) -> set:
     """Return future result, emitting a warning and returning empty set on failure."""
     try:
         return future.result()
     except Exception as e:
-        emit({"type": "warning", "message": f"{source} failed: {e}"})
+        ctx.emit({"type": "warning", "message": f"{source} failed: {e}"})
         return set()
 
 
 def run_scan(domain: str, q: queue.Queue,
              max_workers: int = 100, enrich_threads: int = 50,
-             shodan_key: str = None) -> None:
+             shodan_key: str = None, cfg: Config = None) -> None:
     """Run a full scan and push events into q. Puts None when done."""
 
-    def emit(data: dict) -> None:
-        q.put(data)
+    # ── Build config & context ────────────────────────────────────────────────
+    if cfg is None:
+        cfg = Config.load()
+        cfg.max_workers = max_workers
+        cfg.enrich_threads = enrich_threads
+        if shodan_key:
+            cfg.shodan_key = shodan_key
+
+    ctx = ScanContext(q)
+    emit = ctx.emit
+
+    # Initialise DNS rate limiter
+    init_dns_bucket(rate=cfg.dns_rate, burst=cfg.dns_burst)
 
     try:
         found: set[str] = set()
@@ -57,6 +78,9 @@ def run_scan(domain: str, q: queue.Queue,
         if whois_data.get("name_servers"):
             emit({"type": "status", "message": f"Name servers: {', '.join(whois_data['name_servers'][:4])}"})
         emit({"type": "whois", "data": whois_data})
+
+        if ctx.cancelled:
+            return
 
         # ── Phase 1: DNS ──────────────────────────────────────────────────────
         emit({"type": "phase", "phase": "dns", "message": "Fetching nameservers..."})
@@ -80,7 +104,7 @@ def run_scan(domain: str, q: queue.Queue,
         found |= dns_sub
         emit({"type": "status", "message": f"DNS records yielded {len(dns_sub)} subdomain(s)"})
 
-        # Collect MX / NS / TXT / SOA records (formerly separate "dns_records" phase)
+        # Collect MX / NS / TXT / SOA records
         emit({"type": "status", "message": "Collecting MX / NS / TXT / SOA records..."})
         dns_data = collect_dns_records(domain)
         mx_count  = len(dns_data.get("mx", []))
@@ -91,21 +115,44 @@ def run_scan(domain: str, q: queue.Queue,
 
         emit({"type": "status", "message": f"Total unique so far: {len(found)}"})
 
-        # ── Phase 2: Passive sources ──────────────────────────────────────────
-        emit({"type": "phase", "phase": "passive", "message": "Querying passive sources (crt.sh, HackerTarget)..."})
+        if ctx.cancelled:
+            return
 
-        with ThreadPoolExecutor(max_workers=2) as ex:
+        # ── Phase 2: Passive sources ──────────────────────────────────────────
+        passive_sources = ["crt.sh", "HackerTarget"]
+        if cfg.enable_wayback:
+            passive_sources.append("Wayback")
+        emit({"type": "phase", "phase": "passive",
+              "message": f"Querying passive sources ({', '.join(passive_sources)})..."})
+
+        with ThreadPoolExecutor(max_workers=3) as ex:
             f_crt = ex.submit(fetch_crtsh, domain)
             f_ht  = ex.submit(fetch_hackertarget, domain)
-            crt   = _safe_result(f_crt, "crt.sh", emit)
-            ht    = _safe_result(f_ht,  "HackerTarget", emit)
+            f_wb  = (ex.submit(fetch_wayback, domain, cfg.max_wayback,
+                               cfg.wayback_delay, 30.0, cfg.user_agent)
+                     if cfg.enable_wayback else None)
 
-        found |= crt | ht
+            crt = _safe_result(f_crt, "crt.sh", ctx)
+            ht  = _safe_result(f_ht,  "HackerTarget", ctx)
+            wb  = _safe_result(f_wb,  "Wayback Machine", ctx) if f_wb else set()
+
+        found |= crt | ht | wb
         emit({"type": "status", "message": f"crt.sh: {len(crt)} subdomains"})
         emit({"type": "status", "message": f"HackerTarget: {len(ht)} subdomains"})
+        if cfg.enable_wayback:
+            emit({"type": "status", "message": f"Wayback Machine: {len(wb)} subdomains"})
         emit({"type": "status", "message": f"Total unique so far: {len(found)}"})
 
+        if ctx.cancelled:
+            return
+
         # ── Phase 3: Brute-force ──────────────────────────────────────────────
+        # Detect wildcard DNS before brute-forcing
+        wildcard_ip = detect_wildcard(domain)
+        if wildcard_ip:
+            emit({"type": "status",
+                  "message": f"Wildcard DNS detected ({wildcard_ip}) — filtering false positives"})
+
         emit({"type": "phase", "phase": "brute",
               "message": f"Brute-forcing {len(COMMON_SUBDOMAINS)} common subdomains..."})
 
@@ -113,13 +160,19 @@ def run_scan(domain: str, q: queue.Queue,
         total_brute = len(candidates)
         completed_brute = 0
 
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        with ThreadPoolExecutor(max_workers=cfg.max_workers) as ex:
             futures = {ex.submit(resolve, c): c for c in candidates}
             for f in as_completed(futures):
+                if ctx.cancelled:
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    return
                 result = f.result()
                 completed_brute += 1
                 if result:
                     host, ip = result
+                    # Filter wildcard matches
+                    if wildcard_ip and ip == wildcard_ip:
+                        continue
                     found.add(host)
                     resolved[host] = ip
                     emit({"type": "subdomain", "host": host, "ip": ip, "source": "brute"})
@@ -129,7 +182,53 @@ def run_scan(domain: str, q: queue.Queue,
                           "found": len(resolved)})
 
         emit({"type": "status", "message": f"Brute-force complete — {len(resolved)} live"})
+
+        # ── Phase 3.5: Smart permutations ─────────────────────────────────────
+        if cfg.enable_permutations and found:
+            perm_candidates = generate_permutations(
+                found, domain,
+                max_perms=cfg.max_permutations,
+                high_suffixes=cfg.high_value_suffixes,
+                low_suffixes=cfg.low_value_suffixes,
+                separators=cfg.permutation_separators,
+            )
+
+            if perm_candidates:
+                emit({"type": "status",
+                      "message": f"Resolving {len(perm_candidates)} smart permutations..."})
+
+                total_perm = len(perm_candidates)
+                completed_perm = 0
+
+                with ThreadPoolExecutor(max_workers=cfg.max_workers) as ex:
+                    futures = {ex.submit(resolve, c): c for c in perm_candidates}
+                    for f in as_completed(futures):
+                        if ctx.cancelled:
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            return
+                        result = f.result()
+                        completed_perm += 1
+                        if result:
+                            host, ip = result
+                            if wildcard_ip and ip == wildcard_ip:
+                                continue
+                            found.add(host)
+                            resolved[host] = ip
+                            emit({"type": "subdomain", "host": host, "ip": ip,
+                                  "source": "permutation"})
+                        if completed_perm % 50 == 0 or completed_perm == total_perm:
+                            emit({"type": "progress", "phase": "brute",
+                                  "done": total_brute + completed_perm,
+                                  "total": total_brute + total_perm,
+                                  "found": len(resolved)})
+
+                emit({"type": "status",
+                      "message": f"Permutations complete — {len(resolved)} live total"})
+
         emit({"type": "status", "message": f"Total unique so far: {len(found)}"})
+
+        if ctx.cancelled:
+            return
 
         # ── Phase 4: Resolve passive/DNS hits not yet resolved ────────────────
         passive_only = found - set(resolved.keys())
@@ -139,13 +238,18 @@ def run_scan(domain: str, q: queue.Queue,
             total_resolve = len(passive_only)
             completed_resolve = 0
 
-            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            with ThreadPoolExecutor(max_workers=cfg.max_workers) as ex:
                 futures = {ex.submit(resolve, s): s for s in passive_only}
                 for f in as_completed(futures):
+                    if ctx.cancelled:
+                        ex.shutdown(wait=False, cancel_futures=True)
+                        return
                     result = f.result()
                     completed_resolve += 1
                     if result:
                         host, ip = result
+                        if wildcard_ip and ip == wildcard_ip:
+                            continue
                         resolved[host] = ip
                         emit({"type": "subdomain", "host": host, "ip": ip, "source": "passive"})
                     if completed_resolve % 50 == 0 or completed_resolve == total_resolve:
@@ -155,18 +259,24 @@ def run_scan(domain: str, q: queue.Queue,
 
             emit({"type": "status", "message": f"Resolve complete — {len(resolved)} live subdomains total"})
 
+        if ctx.cancelled:
+            return
+
         # ── Phase 5: Enrich ───────────────────────────────────────────────────
         emit({"type": "phase", "phase": "enrich",
               "message": f"Enriching {len(resolved)} live subdomains..."})
         emit({"type": "status", "message": "Running HTTP probe, IP info, SSL cert, rDNS, nmap port scan, takeover check..."})
-        
+
         # Using optimized enrichment with shared connection pool
-        enriched = collect_enrichment(resolved, threads=enrich_threads)
+        enriched = collect_enrichment(
+            resolved, threads=cfg.enrich_threads,
+            do_ports=cfg.enable_nmap, nmap_top_ports=cfg.nmap_top_ports,
+        )
 
         # ── Phase 5.5: Shodan Enrichment (Optional) ──────────────────────────
-        if shodan_key and shodan_lib:
+        if cfg.shodan_key and shodan_lib:
             emit({"type": "status", "message": "Enriching results with Shodan data..."})
-            api = shodan_lib.Shodan(shodan_key)
+            api = shodan_lib.Shodan(cfg.shodan_key)
             for host, ip in resolved.items():
                 try:
                     s_info = api.host(ip)

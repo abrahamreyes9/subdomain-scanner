@@ -16,11 +16,17 @@ import time
 import threading
 import subprocess
 import shutil
+import itertools
+import urllib.request
+import urllib.parse
+import urllib.error
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from functools import lru_cache
+
+from utils import acquire_dns_token
 
 import requests
 import dns.resolver
@@ -61,6 +67,7 @@ def _get_resolver() -> dns.resolver.Resolver:
 @lru_cache(maxsize=10000)
 def fast_resolve(hostname: str) -> str | None:
     try:
+        acquire_dns_token()
         answers = _get_resolver().resolve(hostname, "A")
         return str(answers[0])
     except Exception:
@@ -233,6 +240,60 @@ def fetch_hackertarget(domain: str, timeout: float = 12.0) -> set[str]:
         return set()
 
 
+def fetch_wayback(domain: str, max_results: int = 50_000, delay: float = 1.0,
+                   timeout: float = 30.0, user_agent: str = "SubDomainScout/2.0") -> set[str]:
+    """Query the Wayback Machine CDX API for subdomains.
+
+    Streams text output line-by-line for memory efficiency.
+    Handles 429 rate-limiting with exponential back-off.
+    """
+    found: set[str] = set()
+    params = urllib.parse.urlencode({
+        "url": f"*.{domain}/*",
+        "output": "text",
+        "fl": "original",
+        "collapse": "urlkey",
+        "limit": str(max_results),
+        "filter": "statuscode:200",
+    })
+    url = f"https://web.archive.org/cdx/search/cdx?{params}"
+    req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+
+    time.sleep(delay)  # polite pause
+
+    retries = 0
+    max_retries = 3
+    while retries <= max_retries:
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as rsp:
+                for raw_line in rsp:
+                    line = raw_line.decode("utf-8", errors="ignore").strip()
+                    if not line:
+                        continue
+                    try:
+                        parsed = urllib.parse.urlparse(line)
+                        host = parsed.hostname
+                        if host and host.lower().endswith(f".{domain}"):
+                            found.add(host.lower())
+                    except Exception:
+                        continue
+            break  # success
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                wait = (2 ** retries) * 5
+                print(f"[!] Wayback rate-limited, sleeping {wait}s...")
+                time.sleep(wait)
+                retries += 1
+                continue
+            print(f"[!] Wayback HTTP error: {e.code}")
+            break
+        except Exception as e:
+            print(f"[!] Wayback error: {e}")
+            break
+
+    return found
+
+
 def fetch_whois(domain: str) -> dict:
     """Return WHOIS data for a domain as a plain dict."""
     if not WHOIS_AVAILABLE:
@@ -260,6 +321,95 @@ def fetch_whois(domain: str) -> dict:
         }
     except Exception:
         return {}
+
+
+# ── Wildcard detection & permutation engine ────────────────────────────────────
+
+def detect_wildcard(domain: str) -> str | None:
+    """Probe for DNS wildcard: resolve a random label and return the IP if it exists.
+
+    Returns the wildcard IP string, or None if no wildcard is configured.
+    """
+    import random
+    import string
+    random_label = "".join(random.choices(string.ascii_lowercase + string.digits, k=16))
+    test_host = f"{random_label}.{domain}"
+    try:
+        acquire_dns_token()
+        answers = _get_resolver().resolve(test_host, "A")
+        wildcard_ip = str(answers[0])
+        return wildcard_ip
+    except Exception:
+        return None
+
+
+def _is_valid_dns_label(label: str) -> bool:
+    """RFC 1035 label validation: alphanumeric + hyphens, 1-63 chars, no leading/trailing hyphen."""
+    return (
+        0 < len(label) <= 63
+        and not label.startswith("-")
+        and not label.endswith("-")
+        and re.fullmatch(r"[A-Za-z0-9-]+", label) is not None
+    )
+
+
+def generate_permutations(found: set[str], domain: str,
+                          max_perms: int = 10_000,
+                          high_suffixes: list[str] | None = None,
+                          low_suffixes: list[str] | None = None,
+                          separators: list[str] | None = None) -> list[str]:
+    """Generate smart subdomain permutations from discovered prefixes.
+
+    Combines known prefixes with high/low-value suffixes (dev, prod, test, etc.)
+    to find related subdomains. Deduplicates against `found` set and caps output.
+
+    Returns a list of candidate FQDNs (not yet in `found`).
+    """
+    if high_suffixes is None:
+        high_suffixes = ["dev", "prod", "test", "staging", "internal", "api", "admin"]
+    if low_suffixes is None:
+        low_suffixes = ["1", "2", "3", "old", "new"]
+    if separators is None:
+        separators = ["-", ""]
+
+    # Extract single-label prefixes from already-found subdomains
+    prefixes: set[str] = set()
+    for fqdn in found:
+        if not fqdn.endswith(f".{domain}"):
+            continue
+        prefix = fqdn[: -(len(domain) + 1)]
+        if "." in prefix or not prefix:
+            continue
+        prefixes.add(prefix)
+
+    candidates: list[str] = []
+    seen: set[str] = set(found)
+    count = 0
+
+    for suffix_set in (high_suffixes, low_suffixes):
+        for prefix, sep, suffix in itertools.product(prefixes, separators, suffix_set):
+            if count >= max_perms:
+                return candidates
+            label = f"{prefix}{sep}{suffix}"
+            fqdn = f"{label}.{domain}"
+            if fqdn not in seen and _is_valid_dns_label(label):
+                candidates.append(fqdn)
+                seen.add(fqdn)
+                count += 1
+
+    # Also generate suffix-prefix combinations (e.g. "dev-mail" from prefix "mail")
+    for suffix_set in (high_suffixes,):
+        for suffix, sep, prefix in itertools.product(suffix_set, separators, prefixes):
+            if count >= max_perms:
+                return candidates
+            label = f"{suffix}{sep}{prefix}"
+            fqdn = f"{label}.{domain}"
+            if fqdn not in seen and _is_valid_dns_label(label):
+                candidates.append(fqdn)
+                seen.add(fqdn)
+                count += 1
+
+    return candidates
 
 
 # ── active DNS brute-force ─────────────────────────────────────────────────────

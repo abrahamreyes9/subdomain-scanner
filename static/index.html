@@ -882,8 +882,9 @@ function h(str) {
 }
 
 function addLiveRow(host, ip, source) {
-  const badge = source === 'brute'   ? '<span class="badge badge-brute">brute</span>'
-              : source === 'axfr'    ? '<span class="badge badge-axfr">axfr</span>'
+  const badge = source === 'brute'       ? '<span class="badge badge-brute">brute</span>'
+              : source === 'axfr'        ? '<span class="badge badge-axfr">axfr</span>'
+              : source === 'permutation' ? '<span class="badge badge-brute">perm</span>'
               : '<span class="badge badge-passive">passive</span>';
   const tr = document.createElement('tr');
   tr.innerHTML = `<td class="mono">${h(host)}</td><td class="mono">${h(ip)}</td><td>${badge}</td>`;
