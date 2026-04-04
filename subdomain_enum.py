@@ -343,10 +343,10 @@ def fetch_whois(domain: str) -> dict:
 
 # ── Wildcard detection & permutation engine ────────────────────────────────────
 
-def detect_wildcard(domain: str) -> str | None:
+def detect_wildcard(domain: str) -> set[str]:
     """Probe for DNS wildcard: resolve a random label and return the IP if it exists.
 
-    Returns the wildcard IP string, or None if no wildcard is configured.
+    Returns the wildcard IPs as a set, or an empty set if no wildcard is configured.
     """
     import random
     import string
@@ -355,10 +355,9 @@ def detect_wildcard(domain: str) -> str | None:
     try:
         acquire_dns_token()
         answers = _get_resolver().resolve(test_host, "A")
-        wildcard_ip = str(answers[0])
-        return wildcard_ip
+        return {str(a) for a in answers}
     except Exception:
-        return None
+        return set()
 
 
 def _is_valid_dns_label(label: str) -> bool:

@@ -25,7 +25,10 @@ class ScanContext:
     def emit(self, data: dict) -> None:
         """Push an event into the SSE queue (if one is attached)."""
         if self._q is not None:
-            self._q.put(data)
+            try:
+                self._q.put(data, timeout=5.0)
+            except queue.Full:
+                self.cancel()
 
     # ── Progress ──────────────────────────────────────────────────────────────
 

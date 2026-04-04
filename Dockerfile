@@ -1,17 +1,18 @@
-FROM python:3.11-slim
+FROM python:3.11.9-slim
 
 WORKDIR /app
 
-# Install system dependencies for aiodns and speed
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    python3-dev \
+    nmap \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+
+RUN adduser --disabled-password --no-create-home scanner
+USER scanner
 
 EXPOSE 8000
 

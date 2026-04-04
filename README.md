@@ -12,7 +12,7 @@ The goal: **know your attack surface before an attacker does.**
 
 ## What It Does
 
-The scanner combines multiple passive intelligence sources to discover and enrich every subdomain associated with a target domain — no port scanning, no active probing beyond HTTP banner grabbing.
+The scanner combines multiple passive intelligence sources and semi-active techniques (such as DNS brute-forcing and lightweight port scanning) to discover and enrich every subdomain associated with a target domain.
 
 ### Discovery Sources
 

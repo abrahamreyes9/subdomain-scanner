@@ -148,10 +148,10 @@ def run_scan(domain: str, q: queue.Queue,
 
         # ── Phase 3: Brute-force ──────────────────────────────────────────────
         # Detect wildcard DNS before brute-forcing
-        wildcard_ip = detect_wildcard(domain)
-        if wildcard_ip:
+        wildcard_ips = detect_wildcard(domain)
+        if wildcard_ips:
             emit({"type": "status",
-                  "message": f"Wildcard DNS detected ({wildcard_ip}) — filtering false positives"})
+                  "message": f"Wildcard DNS detected ({', '.join(wildcard_ips)}) — filtering false positives"})
 
         emit({"type": "phase", "phase": "brute",
               "message": f"Brute-forcing {len(COMMON_SUBDOMAINS)} common subdomains..."})
@@ -171,7 +171,7 @@ def run_scan(domain: str, q: queue.Queue,
                 if result:
                     host, ip = result
                     # Filter wildcard matches
-                    if wildcard_ip and ip == wildcard_ip:
+                    if wildcard_ips and ip in wildcard_ips:
                         continue
                     found.add(host)
                     resolved[host] = ip
@@ -210,7 +210,7 @@ def run_scan(domain: str, q: queue.Queue,
                         completed_perm += 1
                         if result:
                             host, ip = result
-                            if wildcard_ip and ip == wildcard_ip:
+                            if wildcard_ips and ip in wildcard_ips:
                                 continue
                             found.add(host)
                             resolved[host] = ip
@@ -248,7 +248,7 @@ def run_scan(domain: str, q: queue.Queue,
                     completed_resolve += 1
                     if result:
                         host, ip = result
-                        if wildcard_ip and ip == wildcard_ip:
+                        if wildcard_ips and ip in wildcard_ips:
                             continue
                         resolved[host] = ip
                         emit({"type": "subdomain", "host": host, "ip": ip, "source": "passive"})

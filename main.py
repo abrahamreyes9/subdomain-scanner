@@ -22,8 +22,8 @@ load_dotenv()
 app = FastAPI(title="Subdomain Scanner")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# In-memory store: scan_id → queue
-_scans: dict[str, queue.Queue] = {}
+# In-memory store: scan_id → dict with q and accessed state
+_scans: dict[str, dict] = {}
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -48,8 +48,15 @@ async def start_scan(req: ScanRequest):
         raise HTTPException(400, "Invalid domain")
 
     scan_id = str(uuid.uuid4())
-    q: queue.Queue = queue.Queue()
-    _scans[scan_id] = q
+    q: queue.Queue = queue.Queue(maxsize=2000)
+    _scans[scan_id] = {"q": q, "accessed": False, "created_at": time.time()}
+
+    # Cleanup stale unaccessed scans to prevent memory leaks
+    import time as _time
+    now = _time.time()
+    stale = [k for k, v in list(_scans.items()) if not v["accessed"] and now - v["created_at"] > 60]
+    for k in stale:
+        _scans.pop(k, None)
 
     shodan_key = os.getenv("SHODAN_API_KEY")
     thread = threading.Thread(target=run_scan, args=(domain, q, 100, 50, shodan_key), daemon=True)
@@ -60,9 +67,12 @@ async def start_scan(req: ScanRequest):
 
 @app.get("/api/stream/{scan_id}")
 async def stream_results(scan_id: str):
-    q = _scans.get(scan_id)
-    if not q:
+    session = _scans.get(scan_id)
+    if not session:
         raise HTTPException(404, "Scan not found")
+        
+    session["accessed"] = True
+    q = session["q"]
 
     async def generate():
         loop = asyncio.get_event_loop()
