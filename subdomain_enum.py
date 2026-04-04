@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.error
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from functools import lru_cache
 
@@ -888,7 +888,7 @@ def probe_http(host: str, timeout: float = 3.0) -> dict:
 
 
 def get_ssl_cert_info(host: str, timeout: float = 3.0) -> dict:
-    """Return CN and O from the SSL cert of a host."""
+    """Return CN, O, and expiry info from the SSL cert of a host."""
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
@@ -900,10 +900,33 @@ def get_ssl_cert_info(host: str, timeout: float = 3.0) -> dict:
         ) as s:
             cert = s.getpeercert()
             subject = dict(x[0] for x in cert.get("subject", []))
-            return {
+            result = {
                 "cn": subject.get("commonName", ""),
                 "o":  subject.get("organizationName", ""),
             }
+            not_after = cert.get("notAfter")
+            if not_after:
+                expiry_dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                days_remaining = (expiry_dt - now).days
+                result["expires"] = expiry_dt.strftime("%Y-%m-%d")
+                result["days_remaining"] = days_remaining
+                if days_remaining < 0:
+                    result["expiry_alert"] = "CRITICAL"
+                    result["alert_label"]  = "EXPIRED"
+                elif days_remaining <= 7:
+                    result["expiry_alert"] = "CRITICAL"
+                    result["alert_label"]  = "EXPIRES IN 7 DAYS"
+                elif days_remaining <= 30:
+                    result["expiry_alert"] = "HIGH"
+                    result["alert_label"]  = "EXPIRES IN 30 DAYS"
+                elif days_remaining <= 90:
+                    result["expiry_alert"] = "MEDIUM"
+                    result["alert_label"]  = "EXPIRES IN 90 DAYS"
+                elif days_remaining <= 180:
+                    result["expiry_alert"] = "LOW"
+                    result["alert_label"]  = "EXPIRES IN 180 DAYS"
+            return result
     except Exception:
         return {}
 
@@ -1034,6 +1057,10 @@ def print_a_records(resolved: dict[str, str], enriched: dict[str, dict]) -> None
             print(f"  SSL CN : {ssl['cn']}")
         if ssl.get("o"):
             print(f"  SSL O  : {ssl['o']}")
+        if ssl.get("expires"):
+            print(f"  SSL Exp: {ssl['expires']} ({ssl['days_remaining']}d remaining)")
+        if ssl.get("alert_label"):
+            print(f"  *** CERT ALERT: {ssl['alert_label']} ***")
         if shodan:
             if shodan.get("ports"):
                 print(f"  Shodan : ports {', '.join(str(p) for p in shodan['ports'])}")
