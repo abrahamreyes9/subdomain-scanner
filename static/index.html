@@ -136,6 +136,10 @@
   .badge-brute   { background:#1e1b4b; color:#a5b4fc; }
   .badge-passive { background:#0c2a1a; color:#6ee7b7; }
   .badge-axfr    { background:#451a03; color:#fbbf24; }
+  .cert-critical { background: rgba(239,68,68,.15);  color: var(--red);   border: 1px solid var(--red); }
+  .cert-high     { background: rgba(245,158,11,.12); color: var(--amber); border: 1px solid var(--amber); }
+  .cert-medium   { background: rgba(234,179,8,.12);  color: #eab308;      border: 1px solid #eab308; }
+  .cert-low      { background: rgba(56,189,248,.10); color: var(--blue);  border: 1px solid var(--blue); }
   .asn-badge { background: #1e293b; color: var(--amber); font-family: 'JetBrains Mono', monospace;
                font-size: 11px; padding: 2px 7px; border-radius: 5px; }
   html.light .asn-badge { background: #fef3c7; color: #92400e; }
@@ -521,6 +525,10 @@ function handleEvent(e) {
   else if (ev.type === 'enriched') {
     enrichedData[ev.host] = ev;
     inc('stat-enriched');
+    const alert = ev.ssl?.expiry_alert;
+    if (alert === 'CRITICAL' || alert === 'HIGH') {
+      logEntry(`⚠ ${ev.host} — SSL cert ${ev.ssl.alert_label} (${ev.ssl.days_remaining}d remaining)`, 'log-status');
+    }
   }
 
   else if (ev.type === 'dns') {
@@ -686,6 +694,13 @@ function buildServices(http, ssl) {
     for (const t of (svc.tech || [])) out += `<span class="tech-tag">${h(t)}</span>`;
   }
   if (ssl?.cn) out += `<div class="dim-text" style="font-size:11px">CN: ${h(ssl.cn)}</div>`;
+  if (ssl?.expires) {
+    const alertCls = ssl.expiry_alert ? `cert-${ssl.expiry_alert.toLowerCase()}` : 'dim-text';
+    const label    = ssl.alert_label  ? ssl.alert_label : `expires ${h(ssl.expires)}`;
+    out += `<div style="margin-top:2px"><span class="badge ${alertCls}">${label}</span>`;
+    if (!ssl.alert_label) out += ` <span class="dim-text" style="font-size:11px">(${ssl.days_remaining}d)</span>`;
+    out += `</div>`;
+  }
   return out;
 }
 
@@ -755,6 +770,8 @@ function downloadTXT() {
     }
     if (d.ssl?.cn) L.push(`  SSL CN  : ${d.ssl.cn}`);
     if (d.ssl?.o)  L.push(`  SSL Org : ${d.ssl.o}`);
+    if (d.ssl?.expires)     L.push(`  SSL Exp : ${d.ssl.expires} (${d.ssl.days_remaining}d remaining)`);
+    if (d.ssl?.alert_label) L.push(`  *** CERT ALERT: ${d.ssl.alert_label} ***`);
     if (d.takeover) {
       L.push(`  TAKEOVER: CNAME → ${d.takeover.cname}`);
       L.push(`            Service: ${d.takeover.service} | Fingerprint: "${d.takeover.fingerprint}"`);
