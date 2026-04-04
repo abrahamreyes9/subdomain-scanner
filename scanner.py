@@ -79,6 +79,16 @@ def run_scan(domain: str, q: queue.Queue,
         dns_sub = extract_dns_subdomains(domain)
         found |= dns_sub
         emit({"type": "status", "message": f"DNS records yielded {len(dns_sub)} subdomain(s)"})
+
+        # Collect MX / NS / TXT / SOA records (formerly separate "dns_records" phase)
+        emit({"type": "status", "message": "Collecting MX / NS / TXT / SOA records..."})
+        dns_data = collect_dns_records(domain)
+        mx_count  = len(dns_data.get("mx", []))
+        ns_count  = len(dns_data.get("ns", []))
+        txt_count = len(dns_data.get("txt", []))
+        emit({"type": "status", "message": f"MX: {mx_count}  NS: {ns_count}  TXT: {txt_count}"})
+        emit({"type": "dns", "data": dns_data})
+
         emit({"type": "status", "message": f"Total unique so far: {len(found)}"})
 
         # ── Phase 2: Passive sources ──────────────────────────────────────────
@@ -188,17 +198,6 @@ def run_scan(domain: str, q: queue.Queue,
                 "shodan":   data.get("shodan", {}),
                 "takeover": data.get("takeover"),
             })
-
-        # ── Phase 6: DNS records ──────────────────────────────────────────────
-        emit({"type": "phase", "phase": "dns_records",
-              "message": "Collecting MX / NS / TXT / SOA records..."})
-
-        dns_data = collect_dns_records(domain)
-        mx_count  = len(dns_data.get("mx", []))
-        ns_count  = len(dns_data.get("ns", []))
-        txt_count = len(dns_data.get("txt", []))
-        emit({"type": "status", "message": f"MX: {mx_count}  NS: {ns_count}  TXT: {txt_count}"})
-        emit({"type": "dns", "data": dns_data})
 
         emit({"type": "done", "total": len(resolved)})
 

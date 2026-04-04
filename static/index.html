@@ -317,12 +317,11 @@
   <div id="progress">
     <div class="phase-bar">
       <div class="phase" id="ph-whois">WHOIS</div>
-      <div class="phase" id="ph-dns">DNS</div>
+      <div class="phase" id="ph-dns">DNS &amp; Records</div>
       <div class="phase" id="ph-passive">Passive</div>
       <div class="phase" id="ph-brute">Brute-force</div>
       <div class="phase" id="ph-resolve">Resolve</div>
       <div class="phase" id="ph-enrich">Enrich</div>
-      <div class="phase" id="ph-dns_records">DNS Records</div>
     </div>
     <div class="activity-log" id="activity-log"></div>
     <div class="progress-wrap" id="scan-progress-wrap" style="display:none">
@@ -551,7 +550,7 @@ function finishScan() {
   hideScanProgress();
 
   // Mark all phases done
-  ['whois','dns','passive','brute','resolve','enrich','dns_records'].forEach(markPhaseDone);
+  ['whois','dns','passive','brute','resolve','enrich'].forEach(markPhaseDone);
 
   buildReport();
   document.getElementById('report').style.display = 'block';
@@ -894,7 +893,7 @@ function setPhase(phase) {
   document.querySelectorAll('.phase').forEach(el => {
     if (el.id === `ph-${phase}`) el.classList.add('active');
   });
-  const order = ['whois','dns','passive','brute','resolve','enrich','dns_records'];
+  const order = ['whois','dns','passive','brute','resolve','enrich'];
   const idx = order.indexOf(phase);
   order.slice(0, idx).forEach(markPhaseDone);
 }
