@@ -225,7 +225,10 @@
   .vb-tcp   { background: rgba(56,189,248,.12); color: var(--blue);  border: 1px solid var(--blue); }
   .vb-http  { background: rgba(99,102,241,.15); color: var(--accent); border: 1px solid var(--accent); }
   .vb-https { background: rgba(16,185,129,.15); color: var(--green); border: 1px solid var(--green); }
+  .vb-ssl   { background: rgba(16,185,129,.15); color: var(--green); border: 1px solid var(--green); }
+  .vb-rdns  { background: rgba(100,116,139,.15); color: var(--dim);  border: 1px solid var(--dim); }
   .vb-dns   { background: rgba(100,116,139,.15); color: var(--dim);  border: 1px solid var(--dim); }
+  .vb-fail  { background: rgba(239,68,68,.10); color: var(--red); border: 1px solid rgba(239,68,68,.3); opacity: .7; }
 
   /* ── Completion card ── */
   .complete-banner { background: var(--surface); border: 1px solid var(--green);
@@ -510,18 +513,19 @@
       <div class="table-wrap">
         <table id="detected-table" class="resizable-table">
           <colgroup>
-            <col style="width:22%">
             <col style="width:20%">
-            <col style="width:10%">
-            <col style="width:16%">
-            <col style="width:6%">
-            <col style="width:10%">
-            <col style="width:16%">
+            <col style="width:18%">
+            <col style="width:9%">
+            <col style="width:14%">
+            <col style="width:5%">
+            <col style="width:9%">
+            <col style="width:13%">
+            <col style="width:12%">
           </colgroup>
           <thead><tr>
             <th>Host</th><th>IP</th>
             <th>ASN</th><th>Organisation</th><th>Country</th>
-            <th>Open Ports</th><th>Services</th>
+            <th>Open Ports</th><th>Services</th><th>Checks</th>
           </tr></thead>
           <tbody id="detected-tbody"></tbody>
         </table>
@@ -901,7 +905,7 @@ function buildReport() {
         <td data-label="Country">${h(d.country)}</td>
         <td data-label="Open Ports">${ports}</td>
         <td data-label="Services">${services}</td>
-        <td data-label="Verified By">${buildVerifyBadges(acc.methods || [])}</td>`;
+        <td data-label="Verified By">${buildVerifyBadges(acc)}</td>`;
       confirmedTbody.appendChild(tr);
     } else {
       detectedCount++;
@@ -912,7 +916,8 @@ function buildReport() {
         <td data-label="Organisation">${h(d.org)}</td>
         <td data-label="Country">${h(d.country)}</td>
         <td data-label="Open Ports">${ports}</td>
-        <td data-label="Services">${services}</td>`;
+        <td data-label="Services">${services}</td>
+        <td data-label="Checks">${buildVerifyBadges(acc)}</td>`;
       detectedTbody.appendChild(tr);
     }
   }
@@ -1062,20 +1067,26 @@ function buildServices(http, ssl) {
   return out;
 }
 
-function buildVerifyBadges(methods) {
-  if (!methods?.length) return '<span class="dim-text">—</span>';
-  const badgeMap = {
-    ping:  'vb-ping',
-    http:  'vb-http',
-    https: 'vb-https',
-    dns:   'vb-dns',
-  };
-  return methods.map(m => {
-    // tcp:80 → class vb-tcp, label TCP:80
-    if (m.startsWith('tcp:')) return `<span class="verify-badge vb-tcp">${h(m.toUpperCase())}</span>`;
-    const cls = badgeMap[m] || 'vb-dns';
-    return `<span class="verify-badge ${cls}">${h(m.toUpperCase())}</span>`;
-  }).join('');
+function buildVerifyBadges(acc) {
+  const checks = acc?.checks || {};
+  if (!Object.keys(checks).length) return '<span class="dim-text">—</span>';
+  const order = ['ping', 'dns', 'tcp', 'http', 'https', 'ssl', 'rdns'];
+  const labels = { ping:'PING', dns:'DNS', tcp:'TCP', http:'HTTP', https:'HTTPS', ssl:'SSL', rdns:'rDNS' };
+  const passCls = { ping:'vb-ping', dns:'vb-dns', tcp:'vb-tcp', http:'vb-http', https:'vb-https', ssl:'vb-ssl', rdns:'vb-rdns' };
+  let out = '';
+  for (const key of order) {
+    const chk = checks[key];
+    if (!chk) continue;
+    const reason = chk.reason || '';
+    if (chk.pass) {
+      const title = reason ? `${labels[key]}: ${reason}` : labels[key];
+      out += `<span class="verify-badge ${passCls[key]}" title="${h(title)}">${labels[key]}</span>`;
+    } else {
+      const title = `${labels[key]}: ${reason}`;
+      out += `<span class="verify-badge vb-fail" title="${h(title)}">${labels[key]}</span>`;
+    }
+  }
+  return out || '<span class="dim-text">—</span>';
 }
 
 // High-risk ports that should flag as dangerous
