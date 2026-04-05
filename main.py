@@ -6,6 +6,7 @@ import asyncio
 import json
 import queue
 import threading
+import time
 import uuid
 import re
 import os
@@ -52,8 +53,7 @@ async def start_scan(req: ScanRequest):
     _scans[scan_id] = {"q": q, "accessed": False, "created_at": time.time()}
 
     # Cleanup stale unaccessed scans to prevent memory leaks
-    import time as _time
-    now = _time.time()
+    now = time.time()
     stale = [k for k, v in list(_scans.items()) if not v["accessed"] and now - v["created_at"] > 60]
     for k in stale:
         _scans.pop(k, None)
@@ -78,10 +78,13 @@ async def stream_results(scan_id: str):
         loop = asyncio.get_event_loop()
         try:
             while True:
-                # Block in a thread so we don't freeze the async event loop
-                item = await loop.run_in_executor(None, q.get)
+                try:
+                    item = await loop.run_in_executor(None, lambda: q.get(timeout=30))
+                except queue.Empty:
+                    if scan_id not in _scans:
+                        break
+                    continue
                 if item is None:
-                    # Sentinel — scan finished
                     yield f"data: {json.dumps({'type': 'done'})}\n\n"
                     break
                 yield f"data: {json.dumps(item)}\n\n"

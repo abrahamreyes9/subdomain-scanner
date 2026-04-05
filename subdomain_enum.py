@@ -5,7 +5,6 @@ Sources: DNS zone transfer, DNS records (NS/MX/TXT/SRV), crt.sh, HackerTarget, b
 """
 
 import sys
-import signal
 import socket
 import argparse
 import csv
@@ -100,12 +99,6 @@ def fast_reverse_dns(ip: str) -> str:
         return ""
 
 
-def signal_handler(sig, frame):
-    print("\n[!] Scan interrupted by user.")
-    sys.exit(0)
-
-
-signal.signal(signal.SIGINT, signal_handler)
 _QUIET = False
 
 # ── DNS enumeration ───────────────────────────────────────────────────────────
