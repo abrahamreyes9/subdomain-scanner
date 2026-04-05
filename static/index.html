@@ -130,6 +130,7 @@
   td a { color: var(--accent); text-decoration: none; }
   td a:hover { text-decoration: underline; }
   .mono { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+  .nowrap { white-space: nowrap; }
   .dim-text { color: var(--dim); }
   .badge { display: inline-block; padding: 2px 9px; border-radius: 6px;
            font-size: 11px; font-weight: 600; white-space: nowrap; }
@@ -325,9 +326,7 @@
       letter-spacing: .05em; color: var(--dim); display: block; margin-bottom: 2px;
     }
     #a-tbody td:empty { display: none; }
-    /* Hide less critical columns on mobile */
-    #a-tbody td[data-label="rDNS"],
-    #a-tbody td[data-label="CIDR"] { display: none; }
+    .nowrap { white-space: normal; }
     /* Table header hidden — cards are self-labelled */
     #a-tbody ~ thead,
     table:has(#a-tbody) thead { display: none; }
@@ -462,8 +461,8 @@
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th>Host</th><th>IP</th><th>CF</th><th>rDNS</th>
-            <th>ASN</th><th>Organisation</th><th>CIDR</th><th>Country</th>
+            <th>Host</th><th>IP</th>
+            <th>ASN</th><th>Organisation</th><th>Country</th>
             <th>Open Ports</th><th>Services</th>
           </tr></thead>
           <tbody id="a-tbody"></tbody>
@@ -822,15 +821,15 @@ function buildReport() {
         </div>`;
     }
 
+    const rdns = d.rdns && d.rdns !== d.ip ? `<div class="mono dim-text" style="font-size:11px">${h(d.rdns)}</div>` : '';
+    const cidr = d.cidr ? `<div class="mono dim-text" style="font-size:11px">${h(d.cidr)}</div>` : '';
+
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td data-label="Host"><a href="https://${h(host)}" target="_blank">${h(host)}</a>${d.takeover ? ' <span style="color:var(--red);font-size:11px">⚠ takeover</span>' : ''}</td>
-      <td data-label="IP" class="mono">${h(d.ip)}</td>
-      <td data-label="CF">${d.cloudflare ? '<span class="badge badge-cf" title="Behind Cloudflare">CF</span>' : ''}</td>
-      <td data-label="rDNS" class="mono dim-text">${d.rdns && d.rdns !== d.ip ? h(d.rdns) : ''}</td>
-      <td data-label="ASN">${d.asn ? `<span class="asn-badge">${h(d.asn)}</span>` : ''}</td>
+      <td data-label="Host" class="nowrap"><a href="https://${h(host)}" target="_blank">${h(host)}</a>${d.takeover ? ' <span style="color:var(--red);font-size:11px">⚠ takeover</span>' : ''}</td>
+      <td data-label="IP" class="mono nowrap">${h(d.ip)}${rdns}</td>
+      <td data-label="ASN">${d.asn ? `<span class="asn-badge">${h(d.asn)}</span>` : ''}${cidr}</td>
       <td data-label="Organisation">${h(d.org)}</td>
-      <td data-label="CIDR" class="mono dim-text">${h(d.cidr)}</td>
       <td data-label="Country">${h(d.country)}</td>
       <td data-label="Open Ports">${ports}</td>
       <td data-label="Services">${services}</td>`;
