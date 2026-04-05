@@ -123,7 +123,16 @@
   table { width: 100%; border-collapse: collapse; }
   thead th { background: var(--surface2); color: var(--dim); font-size: 10px;
              text-transform: uppercase; letter-spacing: .1em; font-weight: 600;
-             padding: 10px 14px; text-align: left; white-space: nowrap; }
+             padding: 10px 14px; text-align: left; white-space: nowrap;
+             position: relative; }
+  /* Resizable column drag handle */
+  th .col-resize {
+    position: absolute; right: 0; top: 0; bottom: 0; width: 5px;
+    cursor: col-resize; user-select: none; z-index: 2;
+  }
+  th .col-resize:hover,
+  th .col-resize.dragging { background: var(--accent); opacity: .5; }
+  .resizable-table { table-layout: fixed; }
   tbody tr { border-top: 1px solid var(--border); transition: background .15s; }
   tbody tr:hover { background: var(--accent-glow); }
   td { padding: 9px 14px; vertical-align: top; word-break: break-word; }
@@ -152,7 +161,7 @@
   .sans-toggle { cursor:pointer; color:var(--blue); font-size:11px; margin-left:4px; }
   .sans-list { display:none; margin-top:4px; font-size:11px; font-family:'JetBrains Mono',monospace; color:var(--muted); }
   .asn-badge { background: #1e293b; color: var(--amber); font-family: 'JetBrains Mono', monospace;
-               font-size: 11px; padding: 2px 7px; border-radius: 5px; }
+               font-size: 11px; padding: 2px 7px; border-radius: 5px; white-space: nowrap; }
   html.light .asn-badge { background: #fef3c7; color: #92400e; }
   .tech-tag { display: inline-block; background: #0d2137; color: var(--blue);
               font-size: 11px; padding: 2px 7px; border-radius: 5px; margin: 1px; }
@@ -459,7 +468,16 @@
     <div class="report-section">
       <h2>A Records — <span id="a-count">0</span> live subdomains</h2>
       <div class="table-wrap">
-        <table>
+        <table id="a-table" class="resizable-table">
+          <colgroup>
+            <col style="width:22%">
+            <col style="width:20%">
+            <col style="width:10%">
+            <col style="width:16%">
+            <col style="width:6%">
+            <col style="width:10%">
+            <col style="width:16%">
+          </colgroup>
           <thead><tr>
             <th>Host</th><th>IP</th>
             <th>ASN</th><th>Organisation</th><th>Country</th>
@@ -828,7 +846,7 @@ function buildReport() {
     tr.innerHTML = `
       <td data-label="Host" class="nowrap"><a href="https://${h(host)}" target="_blank">${h(host)}</a>${d.takeover ? ' <span style="color:var(--red);font-size:11px">⚠ takeover</span>' : ''}</td>
       <td data-label="IP" class="mono nowrap">${h(d.ip)}${rdns}</td>
-      <td data-label="ASN">${d.asn ? `<span class="asn-badge">${h(d.asn)}</span>` : ''}${cidr}</td>
+      <td data-label="ASN" class="nowrap">${d.asn ? `<span class="asn-badge">${h(d.asn)}</span>` : ''}${cidr}</td>
       <td data-label="Organisation">${h(d.org)}</td>
       <td data-label="Country">${h(d.country)}</td>
       <td data-label="Open Ports">${ports}</td>
@@ -838,6 +856,9 @@ function buildReport() {
 
   document.getElementById('takeover-section').style.display =
     takeovers > 0 ? 'block' : 'none';
+
+  // Init resizable columns on A Records table
+  initResizableColumns(document.getElementById('a-table'));
 
   // MX
   const mxTbody = document.getElementById('mx-tbody');
@@ -1219,6 +1240,62 @@ function showError(msg) {
   const box = document.getElementById('error-box');
   box.style.display = 'block';
   box.innerHTML = `<div class="error-msg">Error: ${h(msg)}</div>`;
+}
+
+// ── Resizable columns ─────────────────────────────────────────────────────────
+function initResizableColumns(table) {
+  const ths = table.querySelectorAll('thead th');
+  const cols = table.querySelectorAll('colgroup col');
+  if (!cols.length) return;
+
+  // Inject drag handles into each header (except the last)
+  ths.forEach((th, i) => {
+    if (i >= ths.length - 1) return;
+    const grip = document.createElement('div');
+    grip.className = 'col-resize';
+    th.appendChild(grip);
+
+    let startX, startW, nextStartW, col, nextCol;
+
+    grip.addEventListener('mousedown', e => {
+      e.preventDefault();
+      startX = e.pageX;
+      col = cols[i];
+      nextCol = cols[i + 1];
+      startW = col.offsetWidth || th.offsetWidth;
+      nextStartW = nextCol ? (cols[i + 1].offsetWidth || ths[i + 1].offsetWidth) : 0;
+
+      // Switch from % to px so dragging is precise
+      const tableW = table.offsetWidth;
+      cols.forEach(c => {
+        const th2 = ths[Array.from(cols).indexOf(c)];
+        if (th2) c.style.width = th2.offsetWidth + 'px';
+      });
+
+      grip.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+
+      const onMove = ev => {
+        const dx = ev.pageX - startX;
+        const newW = Math.max(40, startW + dx);
+        const newNextW = Math.max(40, nextStartW - dx);
+        col.style.width = newW + 'px';
+        if (nextCol) nextCol.style.width = newNextW + 'px';
+      };
+
+      const onUp = () => {
+        grip.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
 }
 
 function reset() {
