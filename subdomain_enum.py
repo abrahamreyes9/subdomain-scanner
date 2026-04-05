@@ -945,6 +945,110 @@ def get_ssl_cert_info(host: str, timeout: float = 3.0) -> dict:
         return {}
 
 
+# ── Internet accessibility verification ────────────────────────────────────────
+
+_VERIFY_PORTS = (80, 443, 8080, 8443, 22)
+
+
+def _ping_host(host: str, timeout: int = 2) -> bool:
+    """ICMP ping using system ping command."""
+    try:
+        if sys.platform == "win32":
+            cmd = ["ping", "-n", "1", "-w", str(timeout * 1000), host]
+        else:
+            cmd = ["ping", "-c", "1", "-W", str(timeout), host]
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout + 2)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _tcp_check_ports(ip: str, ports: tuple[int, ...] = _VERIFY_PORTS,
+                     timeout: float = 3.0) -> list[int]:
+    """Return list of ports that accept a TCP connection."""
+    open_ports: list[int] = []
+    for port in ports:
+        try:
+            with socket.create_connection((ip, port), timeout=timeout):
+                open_ports.append(port)
+        except (OSError, socket.timeout):
+            continue
+    return open_ports
+
+
+def _http_check(host: str, scheme: str = "http", timeout: float = 3.0) -> tuple[bool, int | None]:
+    """Attempt an HTTP(S) request. Any response (even 4xx/5xx) = online."""
+    url = f"{scheme}://{host}/"
+    req = urllib.request.Request(url, headers={"User-Agent": "SubDomainScout/2.0"})
+    ctx = None
+    if scheme == "https":
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as rsp:
+            return True, rsp.status
+    except urllib.error.HTTPError as e:
+        return True, e.code  # 4xx/5xx still means server responded
+    except Exception:
+        return False, None
+
+
+def _dns_cross_check(host: str) -> bool:
+    """Verify OS resolver agrees the host resolves (independent of dnspython)."""
+    try:
+        socket.getaddrinfo(host, None)
+        return True
+    except Exception:
+        return False
+
+
+def verify_accessibility(host: str, ip: str, timeout: float = 3.0) -> dict:
+    """Run multi-method accessibility checks against a host.
+
+    Returns a dict with verdict ('confirmed' or 'detected') and evidence
+    of which methods succeeded. All checks run in parallel.
+    """
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        f_ping  = ex.submit(_ping_host, host)
+        f_tcp   = ex.submit(_tcp_check_ports, ip, _VERIFY_PORTS, timeout)
+        f_http  = ex.submit(_http_check, host, "http", timeout)
+        f_https = ex.submit(_http_check, host, "https", timeout)
+        f_dns   = ex.submit(_dns_cross_check, host)
+
+    ping_ok       = f_ping.result()
+    tcp_ports     = f_tcp.result()
+    http_ok, http_status   = f_http.result()
+    https_ok, https_status = f_https.result()
+    dns_ok        = f_dns.result()
+
+    methods: list[str] = []
+    if ping_ok:
+        methods.append("ping")
+    for p in tcp_ports:
+        methods.append(f"tcp:{p}")
+    if http_ok:
+        methods.append("http")
+    if https_ok:
+        methods.append("https")
+    if dns_ok:
+        methods.append("dns")
+
+    status = "confirmed" if (ping_ok or tcp_ports or http_ok or https_ok) else "detected"
+
+    return {
+        "status":        status,
+        "ping":          ping_ok,
+        "tcp_ports":     tcp_ports,
+        "http":          http_ok,
+        "https":         https_ok,
+        "http_status":   http_status,
+        "https_status":  https_status,
+        "dns_confirmed": dns_ok,
+        "methods":       methods,
+    }
+
+
 def collect_enrichment(
     resolved: dict[str, str],
     threads: int = 100,
@@ -986,6 +1090,8 @@ def collect_enrichment(
                   if do_rdns else {})
         f_shodan = ({host: ex.submit(get_shodan_internetdb, ip, shodan_timeout) for host, ip in items}
                     if do_shodan else {})
+        f_access = {host: ex.submit(verify_accessibility, host, ip, http_timeout)
+                    for host, ip in items}
 
         # Collect nmap results (blocks only if nmap is slower than enrichment)
         nmap_results: dict[str, list[int]] = {}
@@ -1014,14 +1120,15 @@ def collect_enrichment(
             if not ports and shodan_data.get("ports"):
                 ports = shodan_data["ports"]
             enriched[host] = {
-                "ip":         ip,
-                "info":       f_info[host].result(),
-                "http":       f_http[host].result() if do_http else {},
-                "ssl":        f_ssl[host].result() if do_ssl else {},
-                "rdns":       f_rdns[host].result() if do_rdns else "",
-                "shodan":     shodan_data,
-                "ports":      ports,
-                "cloudflare": is_cloudflare_ip(ip),
+                "ip":            ip,
+                "info":          f_info[host].result(),
+                "http":          f_http[host].result() if do_http else {},
+                "ssl":           f_ssl[host].result() if do_ssl else {},
+                "rdns":          f_rdns[host].result() if do_rdns else "",
+                "shodan":        shodan_data,
+                "ports":         ports,
+                "cloudflare":    is_cloudflare_ip(ip),
+                "accessibility": f_access[host].result(),
             }
     return enriched
 

@@ -305,8 +305,9 @@ def run_scan(domain: str, q: queue.Queue,
                 "http":     data.get("http", {}),
                 "ssl":      data.get("ssl", {}),
                 "ports":    data.get("ports", []),
-                "shodan":   data.get("shodan", {}),
-                "takeover": data.get("takeover"),
+                "shodan":        data.get("shodan", {}),
+                "takeover":      data.get("takeover"),
+                "accessibility": data.get("accessibility", {}),
             })
 
         emit({"type": "done", "total": len(resolved)})

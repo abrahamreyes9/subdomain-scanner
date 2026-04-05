@@ -215,6 +215,18 @@
   .legend-count { font-family: 'JetBrains Mono', monospace; color: var(--dim); font-weight: 600; }
   .summary-empty { padding: 32px; text-align: center; color: var(--dim); font-size: 13px; }
 
+  /* ── Attack surface section headers ── */
+  .section-confirmed { border-bottom-color: var(--green) !important; }
+  .section-detected  { border-bottom-color: var(--amber) !important; }
+  .verify-badge { display: inline-block; padding: 1px 6px; border-radius: 4px;
+                  font-size: 10px; font-weight: 600; font-family: 'JetBrains Mono', monospace;
+                  margin: 1px; white-space: nowrap; }
+  .vb-ping  { background: rgba(16,185,129,.15); color: var(--green); border: 1px solid var(--green); }
+  .vb-tcp   { background: rgba(56,189,248,.12); color: var(--blue);  border: 1px solid var(--blue); }
+  .vb-http  { background: rgba(99,102,241,.15); color: var(--accent); border: 1px solid var(--accent); }
+  .vb-https { background: rgba(16,185,129,.15); color: var(--green); border: 1px solid var(--green); }
+  .vb-dns   { background: rgba(100,116,139,.15); color: var(--dim);  border: 1px solid var(--dim); }
+
   /* ── Completion card ── */
   .complete-banner { background: var(--surface); border: 1px solid var(--green);
                      border-radius: 12px; padding: 20px 24px; margin-bottom: 28px;
@@ -323,22 +335,25 @@
     /* SOA grid — stack key/value on very narrow screens */
     .soa-grid { grid-template-columns: 120px 1fr; }
 
-    /* A Records — switch to card layout on mobile */
-    #a-tbody tr { display: block; border: 1px solid var(--border);
-                  border-radius: 8px; margin-bottom: 12px; padding: 12px;
-                  background: var(--surface); }
-    #a-tbody tr:first-child { border-top: 1px solid var(--border); }
-    #a-tbody td { display: block; padding: 3px 0; border: none; font-size: 13px; }
-    #a-tbody td::before {
+    /* Attack surface tables — switch to card layout on mobile */
+    #confirmed-tbody tr, #detected-tbody tr {
+      display: block; border: 1px solid var(--border);
+      border-radius: 8px; margin-bottom: 12px; padding: 12px;
+      background: var(--surface); }
+    #confirmed-tbody tr:first-child, #detected-tbody tr:first-child {
+      border-top: 1px solid var(--border); }
+    #confirmed-tbody td, #detected-tbody td {
+      display: block; padding: 3px 0; border: none; font-size: 13px; }
+    #confirmed-tbody td::before, #detected-tbody td::before {
       content: attr(data-label);
       font-size: 10px; font-weight: 600; text-transform: uppercase;
       letter-spacing: .05em; color: var(--dim); display: block; margin-bottom: 2px;
     }
-    #a-tbody td:empty { display: none; }
+    #confirmed-tbody td:empty, #detected-tbody td:empty { display: none; }
     .nowrap { white-space: normal; }
     /* Table header hidden — cards are self-labelled */
-    #a-tbody ~ thead,
-    table:has(#a-tbody) thead { display: none; }
+    table:has(#confirmed-tbody) thead,
+    table:has(#detected-tbody) thead { display: none; }
   }
 
   @media (max-width: 380px) {
@@ -464,11 +479,36 @@
       </div>
     </div>
 
-    <!-- A Records -->
-    <div class="report-section">
-      <h2>A Records — <span id="a-count">0</span> live subdomains</h2>
+    <!-- Attack Surface — Confirmed Online -->
+    <div class="report-section" id="confirmed-section">
+      <h2 class="section-confirmed">Attack Surface — Confirmed Online — <span id="confirmed-count">0</span> hosts</h2>
       <div class="table-wrap">
-        <table id="a-table" class="resizable-table">
+        <table id="confirmed-table" class="resizable-table">
+          <colgroup>
+            <col style="width:20%">
+            <col style="width:18%">
+            <col style="width:9%">
+            <col style="width:14%">
+            <col style="width:5%">
+            <col style="width:9%">
+            <col style="width:13%">
+            <col style="width:12%">
+          </colgroup>
+          <thead><tr>
+            <th>Host</th><th>IP</th>
+            <th>ASN</th><th>Organisation</th><th>Country</th>
+            <th>Open Ports</th><th>Services</th><th>Verified By</th>
+          </tr></thead>
+          <tbody id="confirmed-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Attack Surface — Detected (Unverified) -->
+    <div class="report-section" id="detected-section" style="display:none">
+      <h2 class="section-detected">Attack Surface — Detected (Unverified) — <span id="detected-count">0</span> hosts</h2>
+      <div class="table-wrap">
+        <table id="detected-table" class="resizable-table">
           <colgroup>
             <col style="width:22%">
             <col style="width:20%">
@@ -483,7 +523,7 @@
             <th>ASN</th><th>Organisation</th><th>Country</th>
             <th>Open Ports</th><th>Services</th>
           </tr></thead>
-          <tbody id="a-tbody"></tbody>
+          <tbody id="detected-tbody"></tbody>
         </table>
       </div>
     </div>
@@ -660,8 +700,11 @@ function finishScan() {
 
   // Show completion card
   const total = Object.keys(enrichedData).length;
-  document.getElementById('complete-sub').textContent =
-    `${total} live subdomain${total !== 1 ? 's' : ''} found for ${domain}`;
+  const confirmed = Object.values(enrichedData).filter(d => d.accessibility?.status === 'confirmed').length;
+  const detected  = total - confirmed;
+  let summary = `${total} live subdomain${total !== 1 ? 's' : ''} found for ${domain}`;
+  if (confirmed || detected) summary += ` — ${confirmed} confirmed online, ${detected} detected (unverified)`;
+  document.getElementById('complete-sub').textContent = summary;
   document.getElementById('complete-card').style.display = 'block';
   document.getElementById('complete-card').scrollIntoView({behavior: 'smooth', block: 'nearest'});
 }
@@ -809,11 +852,13 @@ function buildReport() {
   renderHostingChart(hostingData);
   renderServicesChart(bannersData);
 
-  // A Records
-  const aTbody = document.getElementById('a-tbody');
-  aTbody.innerHTML = '';
+  // Classify hosts into confirmed / detected
+  const confirmedTbody = document.getElementById('confirmed-tbody');
+  const detectedTbody  = document.getElementById('detected-tbody');
+  confirmedTbody.innerHTML = '';
+  detectedTbody.innerHTML  = '';
   const hosts = Object.keys(enrichedData).sort();
-  document.getElementById('a-count').textContent = hosts.length;
+  let confirmedCount = 0, detectedCount = 0;
 
   const takeoverList = document.getElementById('takeover-list');
   takeoverList.innerHTML = '';
@@ -823,15 +868,17 @@ function buildReport() {
     const d        = enrichedData[host];
     const services = buildServices(d.http, d.ssl);
     const ports    = buildPorts(d.ports?.length ? d.ports : (d.shodan?.ports || []));
+    const acc      = d.accessibility || {};
+    const isConfirmed = acc.status === 'confirmed';
 
     // Takeover warning
     if (d.takeover) {
       takeovers++;
       takeoverList.innerHTML += `
         <div class="takeover-item">
-          <div class="t-host">⚠ ${h(host)}</div>
+          <div class="t-host">${h(host)}</div>
           <div class="t-detail">
-            CNAME → ${h(d.takeover.cname)}<br>
+            CNAME: ${h(d.takeover.cname)}<br>
             Service: ${h(d.takeover.service)} &nbsp;|&nbsp;
             Status: ${h(d.takeover.status)} &nbsp;|&nbsp;
             Fingerprint: "${h(d.takeover.fingerprint)}"
@@ -843,22 +890,43 @@ function buildReport() {
     const cidr = d.cidr ? `<div class="mono dim-text" style="font-size:11px">${h(d.cidr)}</div>` : '';
 
     const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td data-label="Host" class="nowrap"><a href="https://${h(host)}" target="_blank">${h(host)}</a>${d.takeover ? ' <span style="color:var(--red);font-size:11px">⚠ takeover</span>' : ''}</td>
-      <td data-label="IP" class="mono nowrap">${h(d.ip)}${rdns}</td>
-      <td data-label="ASN" class="nowrap">${d.asn ? `<span class="asn-badge">${h(d.asn)}</span>` : ''}${cidr}</td>
-      <td data-label="Organisation">${h(d.org)}</td>
-      <td data-label="Country">${h(d.country)}</td>
-      <td data-label="Open Ports">${ports}</td>
-      <td data-label="Services">${services}</td>`;
-    aTbody.appendChild(tr);
+
+    if (isConfirmed) {
+      confirmedCount++;
+      tr.innerHTML = `
+        <td data-label="Host" class="nowrap"><a href="https://${h(host)}" target="_blank">${h(host)}</a>${d.takeover ? ' <span style="color:var(--red);font-size:11px">takeover</span>' : ''}</td>
+        <td data-label="IP" class="mono nowrap">${h(d.ip)}${rdns}</td>
+        <td data-label="ASN" class="nowrap">${d.asn ? `<span class="asn-badge">${h(d.asn)}</span>` : ''}${cidr}</td>
+        <td data-label="Organisation">${h(d.org)}</td>
+        <td data-label="Country">${h(d.country)}</td>
+        <td data-label="Open Ports">${ports}</td>
+        <td data-label="Services">${services}</td>
+        <td data-label="Verified By">${buildVerifyBadges(acc.methods || [])}</td>`;
+      confirmedTbody.appendChild(tr);
+    } else {
+      detectedCount++;
+      tr.innerHTML = `
+        <td data-label="Host" class="nowrap"><a href="https://${h(host)}" target="_blank">${h(host)}</a></td>
+        <td data-label="IP" class="mono nowrap">${h(d.ip)}${rdns}</td>
+        <td data-label="ASN" class="nowrap">${d.asn ? `<span class="asn-badge">${h(d.asn)}</span>` : ''}${cidr}</td>
+        <td data-label="Organisation">${h(d.org)}</td>
+        <td data-label="Country">${h(d.country)}</td>
+        <td data-label="Open Ports">${ports}</td>
+        <td data-label="Services">${services}</td>`;
+      detectedTbody.appendChild(tr);
+    }
   }
+
+  document.getElementById('confirmed-count').textContent = confirmedCount;
+  document.getElementById('detected-count').textContent  = detectedCount;
+  document.getElementById('detected-section').style.display = detectedCount > 0 ? '' : 'none';
 
   document.getElementById('takeover-section').style.display =
     takeovers > 0 ? 'block' : 'none';
 
-  // Init resizable columns on A Records table
-  initResizableColumns(document.getElementById('a-table'));
+  // Init resizable columns on both tables
+  initResizableColumns(document.getElementById('confirmed-table'));
+  if (detectedCount > 0) initResizableColumns(document.getElementById('detected-table'));
 
   // MX
   const mxTbody = document.getElementById('mx-tbody');
@@ -992,6 +1060,22 @@ function buildServices(http, ssl) {
            `<div id="${id}" class="sans-list">${ssl.sans.map(s=>h(s)).join('<br>')}</div></div>`;
   }
   return out;
+}
+
+function buildVerifyBadges(methods) {
+  if (!methods?.length) return '<span class="dim-text">—</span>';
+  const badgeMap = {
+    ping:  'vb-ping',
+    http:  'vb-http',
+    https: 'vb-https',
+    dns:   'vb-dns',
+  };
+  return methods.map(m => {
+    // tcp:80 → class vb-tcp, label TCP:80
+    if (m.startsWith('tcp:')) return `<span class="verify-badge vb-tcp">${h(m.toUpperCase())}</span>`;
+    const cls = badgeMap[m] || 'vb-dns';
+    return `<span class="verify-badge ${cls}">${h(m.toUpperCase())}</span>`;
+  }).join('');
 }
 
 // High-risk ports that should flag as dangerous
@@ -1300,13 +1384,16 @@ function initResizableColumns(table) {
 
 function reset() {
   enrichedData = {}; dnsData = {}; whoisData = {};
-  document.getElementById('live-tbody').innerHTML   = '';
-  document.getElementById('activity-log').innerHTML = '';
+  document.getElementById('live-tbody').innerHTML      = '';
+  document.getElementById('activity-log').innerHTML    = '';
+  document.getElementById('confirmed-tbody').innerHTML = '';
+  document.getElementById('detected-tbody').innerHTML  = '';
   document.getElementById('stat-found').textContent    = '0';
   document.getElementById('stat-enriched').textContent = '0';
   document.getElementById('feed-pulse').style.display  = '';
-  document.getElementById('complete-card').style.display = 'none';
-  document.getElementById('summary-panels').style.display = 'none';
+  document.getElementById('complete-card').style.display   = 'none';
+  document.getElementById('summary-panels').style.display  = 'none';
+  document.getElementById('detected-section').style.display = 'none';
   hideScanProgress();
   document.querySelectorAll('.phase').forEach(el => el.classList.remove('active','done'));
 }
