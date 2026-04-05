@@ -947,125 +947,105 @@ def get_ssl_cert_info(host: str, timeout: float = 3.0) -> dict:
 
 # ── Internet accessibility verification ────────────────────────────────────────
 
-# ── Internet accessibility verification (flat tasks for thread pool) ───────────
+_VERIFY_PORTS = (80, 443, 8080, 8443, 22)
 
-def _ping_host(host: str, timeout: int = 4) -> dict:
-    """ICMP ping using system ping command. Returns result dict with reason."""
+
+def _ping_host(host: str, timeout: int = 2) -> bool:
+    """ICMP ping using system ping command."""
     try:
         if sys.platform == "win32":
             cmd = ["ping", "-n", "1", "-w", str(timeout * 1000), host]
         else:
             cmd = ["ping", "-c", "1", "-W", str(timeout), host]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 3)
-        if r.returncode == 0:
-            return {"pass": True, "reason": "reply"}
-        stderr = (r.stderr or r.stdout or "").lower()
-        if "unreachable" in stderr or "unreachable" in (r.stdout or "").lower():
-            return {"pass": False, "reason": "unreachable"}
-        if "timed out" in stderr or "timed out" in (r.stdout or "").lower():
-            return {"pass": False, "reason": "timeout"}
-        return {"pass": False, "reason": "no-reply"}
-    except subprocess.TimeoutExpired:
-        return {"pass": False, "reason": "timeout"}
-    except FileNotFoundError:
-        return {"pass": False, "reason": "ping-not-found"}
-    except Exception as e:
-        return {"pass": False, "reason": str(type(e).__name__).lower()}
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout + 2)
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
-def _dns_cross_check(host: str) -> dict:
+def _tcp_check_ports(ip: str, ports: tuple[int, ...] = _VERIFY_PORTS,
+                     timeout: float = 3.0) -> list[int]:
+    """Return list of ports that accept a TCP connection."""
+    open_ports: list[int] = []
+    for port in ports:
+        try:
+            with socket.create_connection((ip, port), timeout=timeout):
+                open_ports.append(port)
+        except (OSError, socket.timeout):
+            continue
+    return open_ports
+
+
+def _http_check(host: str, scheme: str = "http", timeout: float = 3.0) -> tuple[bool, int | None]:
+    """Attempt an HTTP(S) request. Any response (even 4xx/5xx) = online."""
+    url = f"{scheme}://{host}/"
+    req = urllib.request.Request(url, headers={"User-Agent": "SubDomainScout/2.0"})
+    ctx = None
+    if scheme == "https":
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as rsp:
+            return True, rsp.status
+    except urllib.error.HTTPError as e:
+        return True, e.code  # 4xx/5xx still means server responded
+    except Exception:
+        return False, None
+
+
+def _dns_cross_check(host: str) -> bool:
     """Verify OS resolver agrees the host resolves (independent of dnspython)."""
     try:
-        results = socket.getaddrinfo(host, None)
-        ips = list({r[4][0] for r in results})
-        return {"pass": True, "reason": "resolved", "ips": ips}
-    except socket.gaierror as e:
-        return {"pass": False, "reason": f"gaierror:{e.args[0]}"}
-    except Exception as e:
-        return {"pass": False, "reason": str(type(e).__name__).lower()}
+        socket.getaddrinfo(host, None)
+        return True
+    except Exception:
+        return False
 
 
-def _build_accessibility(
-    ping_result: dict,
-    dns_result: dict,
-    http_data: dict,
-    ssl_data: dict,
-    rdns: str,
-    ports: list[int],
-) -> dict:
-    """Build accessibility verdict from already-collected enrichment data.
+def verify_accessibility(host: str, ip: str, timeout: float = 3.0) -> dict:
+    """Run multi-method accessibility checks against a host.
 
-    Uses results from the existing enrichment pipeline (HTTP probe, SSL cert,
-    port scan, rDNS) plus dedicated ping and DNS cross-check tasks.
-    No nested thread pools — all inputs are pre-computed.
+    Returns a dict with verdict ('confirmed' or 'detected') and evidence
+    of which methods succeeded. All checks run in parallel.
     """
-    checks: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        f_ping  = ex.submit(_ping_host, host)
+        f_tcp   = ex.submit(_tcp_check_ports, ip, _VERIFY_PORTS, timeout)
+        f_http  = ex.submit(_http_check, host, "http", timeout)
+        f_https = ex.submit(_http_check, host, "https", timeout)
+        f_dns   = ex.submit(_dns_cross_check, host)
+
+    ping_ok       = f_ping.result()
+    tcp_ports     = f_tcp.result()
+    http_ok, http_status   = f_http.result()
+    https_ok, https_status = f_https.result()
+    dns_ok        = f_dns.result()
+
     methods: list[str] = []
-
-    # 1. ICMP Ping
-    checks["ping"] = ping_result
-    if ping_result.get("pass"):
+    if ping_ok:
         methods.append("ping")
-
-    # 2. DNS cross-check (OS resolver)
-    checks["dns"] = dns_result
-    if dns_result.get("pass"):
+    for p in tcp_ports:
+        methods.append(f"tcp:{p}")
+    if http_ok:
+        methods.append("http")
+    if https_ok:
+        methods.append("https")
+    if dns_ok:
         methods.append("dns")
 
-    # 3. HTTP / HTTPS — derived from existing probe_http() results
-    for label in ("http", "https", "http8080"):
-        svc = http_data.get(label)
-        if svc:
-            server = svc.get("server", "")
-            if server and server != "ssl-error":
-                checks[label] = {"pass": True, "reason": f"{server}"}
-                methods.append(label)
-            elif server == "ssl-error":
-                checks[label] = {"pass": False, "reason": "ssl-error"}
-            # else: no entry (wasn't probed or no response)
-
-    # Fill in missing HTTP/HTTPS as failures
-    if "http" not in checks:
-        checks["http"] = {"pass": False, "reason": "no-response"}
-    if "https" not in checks:
-        checks["https"] = {"pass": False, "reason": "no-response"}
-
-    # 4. TCP ports — derived from existing port scan (nmap / socket)
-    if ports:
-        checks["tcp"] = {"pass": True, "reason": f"ports:{','.join(str(p) for p in ports[:10])}"}
-        for p in ports:
-            methods.append(f"tcp:{p}")
-    else:
-        checks["tcp"] = {"pass": False, "reason": "no-open-ports"}
-
-    # 5. SSL/TLS — derived from existing get_ssl_cert_info()
-    if ssl_data.get("cn"):
-        checks["ssl"] = {"pass": True, "reason": f"cn:{ssl_data['cn']}"}
-        if "https" not in methods:
-            methods.append("ssl")
-    else:
-        checks["ssl"] = {"pass": False, "reason": "no-cert"}
-
-    # 6. Reverse DNS
-    if rdns and rdns != "":
-        checks["rdns"] = {"pass": True, "reason": rdns}
-        methods.append("rdns")
-    else:
-        checks["rdns"] = {"pass": False, "reason": "no-ptr"}
-
-    # Verdict: confirmed if ANY network-level check succeeded
-    confirmed = (
-        ping_result.get("pass")
-        or dns_result.get("pass")
-        or any(http_data.get(l, {}).get("server", "") not in ("", "ssl-error") for l in ("http", "https", "http8080"))
-        or bool(ports)
-        or bool(ssl_data.get("cn"))
-    )
+    status = "confirmed" if (ping_ok or tcp_ports or http_ok or https_ok) else "detected"
 
     return {
-        "status":  "confirmed" if confirmed else "detected",
-        "methods": methods,
-        "checks":  checks,
+        "status":        status,
+        "ping":          ping_ok,
+        "tcp_ports":     tcp_ports,
+        "http":          http_ok,
+        "https":         https_ok,
+        "http_status":   http_status,
+        "https_status":  https_status,
+        "dns_confirmed": dns_ok,
+        "methods":       methods,
     }
 
 
@@ -1110,8 +1090,8 @@ def collect_enrichment(
                   if do_rdns else {})
         f_shodan = ({host: ex.submit(get_shodan_internetdb, ip, shodan_timeout) for host, ip in items}
                     if do_shodan else {})
-        f_ping = {host: ex.submit(_ping_host, host) for host, _ in items}
-        f_dns_check = {host: ex.submit(_dns_cross_check, host) for host, _ in items}
+        f_access = {host: ex.submit(verify_accessibility, host, ip, http_timeout)
+                    for host, ip in items}
 
         # Collect nmap results (blocks only if nmap is slower than enrichment)
         nmap_results: dict[str, list[int]] = {}
@@ -1139,26 +1119,16 @@ def collect_enrichment(
             ports = nmap_results.get(ip, [])
             if not ports and shodan_data.get("ports"):
                 ports = shodan_data["ports"]
-            http_data = f_http[host].result() if do_http else {}
-            ssl_data  = f_ssl[host].result() if do_ssl else {}
-            rdns_val  = f_rdns[host].result() if do_rdns else ""
             enriched[host] = {
                 "ip":            ip,
                 "info":          f_info[host].result(),
-                "http":          http_data,
-                "ssl":           ssl_data,
-                "rdns":          rdns_val,
+                "http":          f_http[host].result() if do_http else {},
+                "ssl":           f_ssl[host].result() if do_ssl else {},
+                "rdns":          f_rdns[host].result() if do_rdns else "",
                 "shodan":        shodan_data,
                 "ports":         ports,
                 "cloudflare":    is_cloudflare_ip(ip),
-                "accessibility": _build_accessibility(
-                    f_ping[host].result(),
-                    f_dns_check[host].result(),
-                    http_data,
-                    ssl_data,
-                    rdns_val,
-                    ports,
-                ),
+                "accessibility": f_access[host].result(),
             }
     return enriched
 
