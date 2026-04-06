@@ -335,6 +335,12 @@
     /* SOA grid — stack key/value on very narrow screens */
     .soa-grid { grid-template-columns: 120px 1fr; }
 
+    /* Disable fixed table layout on mobile — cards don't need it */
+    .resizable-table { table-layout: auto; }
+    #confirmed-table colgroup,
+    #detected-table colgroup { display: none; }
+    th .col-resize { display: none; }
+
     /* Attack surface tables — switch to card layout on mobile */
     #confirmed-tbody tr, #detected-tbody tr {
       display: block; border: 1px solid var(--border);
@@ -343,7 +349,8 @@
     #confirmed-tbody tr:first-child, #detected-tbody tr:first-child {
       border-top: 1px solid var(--border); }
     #confirmed-tbody td, #detected-tbody td {
-      display: block; padding: 3px 0; border: none; font-size: 13px; }
+      display: block; padding: 4px 0; border: none; font-size: 13px;
+      word-break: break-all; }
     #confirmed-tbody td::before, #detected-tbody td::before {
       content: attr(data-label);
       font-size: 10px; font-weight: 600; text-transform: uppercase;
@@ -924,9 +931,11 @@ function buildReport() {
   document.getElementById('takeover-section').style.display =
     takeovers > 0 ? 'block' : 'none';
 
-  // Init resizable columns on both tables
-  initResizableColumns(document.getElementById('confirmed-table'));
-  if (detectedCount > 0) initResizableColumns(document.getElementById('detected-table'));
+  // Init resizable columns on both tables (skip on mobile — no drag support)
+  if (window.innerWidth > 640) {
+    initResizableColumns(document.getElementById('confirmed-table'));
+    if (detectedCount > 0) initResizableColumns(document.getElementById('detected-table'));
+  }
 
   // MX
   const mxTbody = document.getElementById('mx-tbody');
