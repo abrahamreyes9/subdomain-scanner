@@ -215,6 +215,17 @@
   .legend-count { font-family: 'JetBrains Mono', monospace; color: var(--dim); font-weight: 600; }
   .summary-empty { padding: 32px; text-align: center; color: var(--dim); font-size: 13px; }
 
+  /* Cert expiry detail list */
+  .certexpiry-details { margin-top: 14px; max-height: 180px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  .certexpiry-item { display: flex; align-items: center; gap: 10px; font-size: 12px;
+                     padding: 6px 10px; border-radius: 6px; background: var(--surface2); }
+  .certexpiry-item .ce-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .certexpiry-item .ce-host { flex: 1; font-family: 'JetBrains Mono', monospace; color: var(--text);
+                              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .certexpiry-item .ce-cn { font-family: 'JetBrains Mono', monospace; color: var(--dim); font-size: 11px;
+                            max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .certexpiry-item .ce-days { flex-shrink: 0; font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+
   /* ── Attack surface section headers ── */
   .section-confirmed { border-bottom-color: var(--green) !important; }
   .section-detected  { border-bottom-color: var(--amber) !important; }
@@ -320,6 +331,7 @@
     .hosting-bar-label { width: 120px; font-size: 11px; }
     .services-chart { flex-direction: column; align-items: center; }
     .donut-wrap { width: 140px; height: 140px; }
+    .certexpiry-item .ce-cn { display: none; }
 
     /* Completion card stacks on mobile */
     .complete-banner { flex-direction: column; align-items: flex-start; }
@@ -483,6 +495,25 @@
           </div>
           <div id="services-legend" class="services-legend"></div>
         </div>
+      </div>
+      <div class="report-section summary-panel">
+        <h2>Attack Surface — Online</h2>
+        <div id="surface-chart" class="services-chart">
+          <div class="donut-wrap">
+            <svg id="surface-donut" viewBox="0 0 200 200" class="donut-svg"></svg>
+          </div>
+          <div id="surface-legend" class="services-legend"></div>
+        </div>
+      </div>
+      <div class="report-section summary-panel">
+        <h2>Certificate Expiry</h2>
+        <div id="certexpiry-chart" class="services-chart">
+          <div class="donut-wrap">
+            <svg id="certexpiry-donut" viewBox="0 0 200 200" class="donut-svg"></svg>
+          </div>
+          <div id="certexpiry-legend" class="services-legend"></div>
+        </div>
+        <div id="certexpiry-details" class="certexpiry-details"></div>
       </div>
     </div>
 
@@ -849,15 +880,217 @@ function renderServicesChart(data) {
   svg.appendChild(subtext);
 }
 
+// ── Attack Surface Online donut ──────────────────────────────────────────────
+function renderSurfaceChart(confirmed, detected) {
+  const svg = document.getElementById('surface-donut');
+  const legend = document.getElementById('surface-legend');
+  svg.innerHTML = '';
+  legend.innerHTML = '';
+
+  const total = confirmed + detected;
+  if (!total) {
+    document.getElementById('surface-chart').innerHTML =
+      '<div class="summary-empty">No host data available</div>';
+    return;
+  }
+
+  const COLORS = ['#10b981', '#f59e0b']; // green=confirmed, amber=detected
+  const data = [
+    { label: 'Confirmed Online', count: confirmed },
+    { label: 'Detected (Unverified)', count: detected },
+  ].filter(d => d.count > 0);
+
+  const cx = 100, cy = 100, r = 70;
+  const circumference = 2 * Math.PI * r;
+
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', r);
+  bg.setAttribute('fill', 'none');
+  bg.setAttribute('stroke', 'var(--surface2)');
+  bg.setAttribute('stroke-width', '28');
+  svg.appendChild(bg);
+
+  let cumulative = 0;
+  data.forEach((item, i) => {
+    const fraction = item.count / total;
+    const dashLen = fraction * circumference;
+    const gapLen = circumference - dashLen;
+    const offset = -(cumulative * circumference) + (circumference / 4);
+
+    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    circle.setAttribute('cx', cx); circle.setAttribute('cy', cy); circle.setAttribute('r', r);
+    circle.setAttribute('fill', 'none');
+    circle.setAttribute('stroke', COLORS[i]);
+    circle.setAttribute('stroke-width', '28');
+    circle.setAttribute('stroke-dasharray', `${dashLen} ${gapLen}`);
+    circle.setAttribute('stroke-dashoffset', String(offset));
+    svg.appendChild(circle);
+    cumulative += fraction;
+
+    const row = document.createElement('div');
+    row.className = 'legend-item';
+    row.innerHTML = `
+      <div class="legend-swatch" style="background:${COLORS[i]}"></div>
+      <div class="legend-name">${h(item.label)}</div>
+      <div class="legend-count">${item.count}</div>`;
+    legend.appendChild(row);
+  });
+
+  const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  text.setAttribute('x', cx); text.setAttribute('y', cy - 6);
+  text.setAttribute('text-anchor', 'middle');
+  text.setAttribute('fill', 'var(--text)');
+  text.setAttribute('font-size', '28');
+  text.setAttribute('font-weight', '700');
+  text.setAttribute('font-family', 'Inter, sans-serif');
+  text.textContent = total;
+  svg.appendChild(text);
+
+  const subtext = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  subtext.setAttribute('x', cx); subtext.setAttribute('y', cy + 14);
+  subtext.setAttribute('text-anchor', 'middle');
+  subtext.setAttribute('fill', 'var(--dim)');
+  subtext.setAttribute('font-size', '11');
+  subtext.setAttribute('font-family', 'Inter, sans-serif');
+  subtext.textContent = 'hosts';
+  svg.appendChild(subtext);
+}
+
+// ── Certificate Expiry donut + detail list ───────────────────────────────────
+function aggregateCertExpiry() {
+  const buckets = { critical: [], high: [], medium: [], ok: [] };
+  for (const host of Object.keys(enrichedData)) {
+    const ssl = enrichedData[host].ssl;
+    if (!ssl || !ssl.expires) continue;
+    const days = ssl.days_remaining;
+    if (days == null) continue;
+    const entry = { host, cn: ssl.cn || '', days, expires: ssl.expires };
+    if (days <= 30)       buckets.critical.push(entry);
+    else if (days <= 90)  buckets.high.push(entry);
+    else if (days <= 180) buckets.medium.push(entry);
+    else                  buckets.ok.push(entry);
+  }
+  // Sort each bucket by days ascending (most urgent first)
+  for (const k of Object.keys(buckets)) buckets[k].sort((a, b) => a.days - b.days);
+  return buckets;
+}
+
+function renderCertExpiryChart(buckets) {
+  const svg = document.getElementById('certexpiry-donut');
+  const legend = document.getElementById('certexpiry-legend');
+  const details = document.getElementById('certexpiry-details');
+  svg.innerHTML = '';
+  legend.innerHTML = '';
+  details.innerHTML = '';
+
+  const segments = [
+    { label: '≤ 30 days',   count: buckets.critical.length, color: '#ef4444' },
+    { label: '≤ 90 days',   count: buckets.high.length,     color: '#f59e0b' },
+    { label: '≤ 180 days',  count: buckets.medium.length,   color: '#eab308' },
+    { label: '180+ days',   count: buckets.ok.length,        color: '#10b981' },
+  ];
+  const total = segments.reduce((s, d) => s + d.count, 0);
+
+  if (!total) {
+    document.getElementById('certexpiry-chart').innerHTML =
+      '<div class="summary-empty">No SSL certificate data available</div>';
+    details.style.display = 'none';
+    return;
+  }
+
+  const cx = 100, cy = 100, r = 70;
+  const circumference = 2 * Math.PI * r;
+
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', r);
+  bg.setAttribute('fill', 'none');
+  bg.setAttribute('stroke', 'var(--surface2)');
+  bg.setAttribute('stroke-width', '28');
+  svg.appendChild(bg);
+
+  let cumulative = 0;
+  segments.filter(s => s.count > 0).forEach(item => {
+    const fraction = item.count / total;
+    const dashLen = fraction * circumference;
+    const gapLen = circumference - dashLen;
+    const offset = -(cumulative * circumference) + (circumference / 4);
+
+    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    circle.setAttribute('cx', cx); circle.setAttribute('cy', cy); circle.setAttribute('r', r);
+    circle.setAttribute('fill', 'none');
+    circle.setAttribute('stroke', item.color);
+    circle.setAttribute('stroke-width', '28');
+    circle.setAttribute('stroke-dasharray', `${dashLen} ${gapLen}`);
+    circle.setAttribute('stroke-dashoffset', String(offset));
+    svg.appendChild(circle);
+    cumulative += fraction;
+  });
+
+  // Center text
+  const expiring = buckets.critical.length + buckets.high.length + buckets.medium.length;
+  const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  text.setAttribute('x', cx); text.setAttribute('y', cy - 6);
+  text.setAttribute('text-anchor', 'middle');
+  text.setAttribute('fill', expiring > 0 ? '#ef4444' : 'var(--text)');
+  text.setAttribute('font-size', '28');
+  text.setAttribute('font-weight', '700');
+  text.setAttribute('font-family', 'Inter, sans-serif');
+  text.textContent = total;
+  svg.appendChild(text);
+
+  const subtext = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  subtext.setAttribute('x', cx); subtext.setAttribute('y', cy + 14);
+  subtext.setAttribute('text-anchor', 'middle');
+  subtext.setAttribute('fill', 'var(--dim)');
+  subtext.setAttribute('font-size', '11');
+  subtext.setAttribute('font-family', 'Inter, sans-serif');
+  subtext.textContent = 'certs';
+  svg.appendChild(subtext);
+
+  // Legend
+  for (const item of segments) {
+    const row = document.createElement('div');
+    row.className = 'legend-item';
+    row.innerHTML = `
+      <div class="legend-swatch" style="background:${item.color}"></div>
+      <div class="legend-name">${item.label}</div>
+      <div class="legend-count">${item.count}</div>`;
+    legend.appendChild(row);
+  }
+
+  // Detail list — show certs expiring within 180 days
+  const expiring_entries = [...buckets.critical, ...buckets.high, ...buckets.medium];
+  if (expiring_entries.length) {
+    for (const e of expiring_entries) {
+      const color = e.days <= 30 ? '#ef4444' : e.days <= 90 ? '#f59e0b' : '#eab308';
+      const dayColor = e.days <= 30 ? 'var(--red)' : e.days <= 90 ? 'var(--amber)' : '#eab308';
+      const row = document.createElement('div');
+      row.className = 'certexpiry-item';
+      row.innerHTML = `
+        <div class="ce-dot" style="background:${color}"></div>
+        <div class="ce-host" title="${h(e.host)}">${h(e.host)}</div>
+        <div class="ce-cn" title="CN: ${h(e.cn)}">${h(e.cn)}</div>
+        <div class="ce-days" style="color:${dayColor}">${e.days}d</div>`;
+      details.appendChild(row);
+    }
+    details.style.display = '';
+  } else {
+    details.style.display = 'none';
+  }
+}
+
 // ── Build final report ─────────────────────────────────────────────────────────
 function buildReport() {
   // Summary panels
   const hostingData = aggregateHosting();
   const bannersData = aggregateBanners();
+  const certData    = aggregateCertExpiry();
+  const hasData = hostingData.length || bannersData.length || Object.keys(enrichedData).length;
   const sp = document.getElementById('summary-panels');
-  sp.style.display = (hostingData.length || bannersData.length) ? '' : 'none';
+  sp.style.display = hasData ? '' : 'none';
   renderHostingChart(hostingData);
   renderServicesChart(bannersData);
+  renderCertExpiryChart(certData);
 
   // Classify hosts into confirmed / detected
   const confirmedTbody = document.getElementById('confirmed-tbody');
@@ -927,6 +1160,9 @@ function buildReport() {
   document.getElementById('confirmed-count').textContent = confirmedCount;
   document.getElementById('detected-count').textContent  = detectedCount;
   document.getElementById('detected-section').style.display = detectedCount > 0 ? '' : 'none';
+
+  // Attack Surface Online donut (needs counts from classification above)
+  renderSurfaceChart(confirmedCount, detectedCount);
 
   document.getElementById('takeover-section').style.display =
     takeovers > 0 ? 'block' : 'none';
@@ -1403,6 +1639,11 @@ function reset() {
   document.getElementById('complete-card').style.display   = 'none';
   document.getElementById('summary-panels').style.display  = 'none';
   document.getElementById('detected-section').style.display = 'none';
+  document.getElementById('surface-donut').innerHTML = '';
+  document.getElementById('surface-legend').innerHTML = '';
+  document.getElementById('certexpiry-donut').innerHTML = '';
+  document.getElementById('certexpiry-legend').innerHTML = '';
+  document.getElementById('certexpiry-details').innerHTML = '';
   hideScanProgress();
   document.querySelectorAll('.phase').forEach(el => el.classList.remove('active','done'));
 }
