@@ -874,7 +874,17 @@ def _probe_one(session: requests.Session, scheme: str, port: int,
         server = r.headers.get("server", "unknown server")
         title  = _get_title(r.text)
         tech   = _detect_tech(dict(r.headers), r.text)
-        entry: dict = {"server": server}
+        entry: dict = {"server": server, "status": r.status_code}
+
+        # Capture redirect chain and final landing URL
+        if r.history:
+            entry["redirects"] = [
+                {"status": resp.status_code, "url": resp.headers.get("Location", "")}
+                for resp in r.history
+            ]
+            entry["final_status"] = r.status_code
+            entry["final_url"] = r.url
+
         if title:
             entry["title"] = title[:80]
         if tech:
@@ -950,14 +960,14 @@ def get_ssl_cert_info(host: str, timeout: float = 3.0) -> dict:
 _VERIFY_PORTS = (80, 443, 8080, 8443, 22)
 
 
-def _ping_host(host: str, timeout: int = 2) -> bool:
+def _ping_host(host: str, timeout: int = 4) -> bool:
     """ICMP ping using system ping command."""
     try:
         if sys.platform == "win32":
             cmd = ["ping", "-n", "1", "-w", str(timeout * 1000), host]
         else:
             cmd = ["ping", "-c", "1", "-W", str(timeout), host]
-        r = subprocess.run(cmd, capture_output=True, timeout=timeout + 2)
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout + 3)
         return r.returncode == 0
     except Exception:
         return False
@@ -1003,25 +1013,13 @@ def _dns_cross_check(host: str) -> bool:
         return False
 
 
-def verify_accessibility(host: str, ip: str, timeout: float = 3.0) -> dict:
-    """Run multi-method accessibility checks against a host.
-
-    Returns a dict with verdict ('confirmed' or 'detected') and evidence
-    of which methods succeeded. All checks run in parallel.
-    """
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        f_ping  = ex.submit(_ping_host, host)
-        f_tcp   = ex.submit(_tcp_check_ports, ip, _VERIFY_PORTS, timeout)
-        f_http  = ex.submit(_http_check, host, "http", timeout)
-        f_https = ex.submit(_http_check, host, "https", timeout)
-        f_dns   = ex.submit(_dns_cross_check, host)
-
-    ping_ok       = f_ping.result()
-    tcp_ports     = f_tcp.result()
-    http_ok, http_status   = f_http.result()
-    https_ok, https_status = f_https.result()
-    dns_ok        = f_dns.result()
-
+def _build_accessibility(
+    ping_ok: bool, tcp_ports: list[int],
+    http_ok: bool, http_status: int | None,
+    https_ok: bool, https_status: int | None,
+    dns_ok: bool,
+) -> dict:
+    """Build accessibility verdict from pre-computed check results."""
     methods: list[str] = []
     if ping_ok:
         methods.append("ping")
@@ -1065,8 +1063,9 @@ def collect_enrichment(
 ) -> dict[str, dict]:
     """Enrich all resolved hosts using a single flat thread pool.
 
-    All sub-tasks (IP info, HTTP probe, SSL cert, rDNS) for every host are
-    submitted directly — no nested executors, no per-host pool spin-up.
+    All sub-tasks — IP info, HTTP probes (parallelised per-scheme), SSL cert,
+    rDNS, Shodan, and accessibility checks — are submitted directly to one
+    pool.  No nested executors, no per-host pool spin-up.
     Port scanning (nmap or socket fallback) runs in parallel with them.
     """
     items = sorted(resolved.items())
@@ -1081,17 +1080,32 @@ def collect_enrichment(
                    if nmap_executor else None)
 
     with ThreadPoolExecutor(max_workers=threads) as ex:
-        f_info = {host: ex.submit(get_ip_info,        ip)   for host, ip in items}
-        f_http = ({host: ex.submit(probe_http, host, http_timeout) for host, _ in items}
-                  if do_http else {})
+        f_info = {host: ex.submit(get_ip_info, ip) for host, ip in items}
+
+        # HTTP probes — each scheme submitted independently (was sequential)
+        f_probe_https = ({host: ex.submit(_probe_one, _http_session, "https", 443, host, http_timeout)
+                          for host, _ in items} if do_http else {})
+        f_probe_http  = ({host: ex.submit(_probe_one, _http_session, "http", 80, host, http_timeout)
+                          for host, _ in items} if do_http else {})
+        f_probe_8080  = ({host: ex.submit(_probe_one, _http_session, "http", 8080, host, http_timeout)
+                          for host, _ in items} if do_http else {})
+
         f_ssl  = ({host: ex.submit(get_ssl_cert_info, host, ssl_timeout) for host, _ in items}
                   if do_ssl else {})
         f_rdns = ({host: ex.submit(reverse_dns, ip) for host, ip in items}
                   if do_rdns else {})
         f_shodan = ({host: ex.submit(get_shodan_internetdb, ip, shodan_timeout) for host, ip in items}
                     if do_shodan else {})
-        f_access = {host: ex.submit(verify_accessibility, host, ip, http_timeout)
-                    for host, ip in items}
+
+        # Accessibility checks — flat in this pool (no nested executor)
+        f_ping       = {host: ex.submit(_ping_host, host) for host, _ in items}
+        f_tcp        = {host: ex.submit(_tcp_check_ports, ip, _VERIFY_PORTS, http_timeout)
+                        for host, ip in items}
+        f_http_chk   = {host: ex.submit(_http_check, host, "http", http_timeout)
+                        for host, _ in items}
+        f_https_chk  = {host: ex.submit(_http_check, host, "https", http_timeout)
+                        for host, _ in items}
+        f_dns_chk    = {host: ex.submit(_dns_cross_check, host) for host, _ in items}
 
         # Collect nmap results (blocks only if nmap is slower than enrichment)
         nmap_results: dict[str, list[int]] = {}
@@ -1119,16 +1133,37 @@ def collect_enrichment(
             ports = nmap_results.get(ip, [])
             if not ports and shodan_data.get("ports"):
                 ports = shodan_data["ports"]
+
+            # Assemble HTTP probe results (was one call, now three parallel)
+            http_data: dict = {}
+            if do_http:
+                for label, fut in [("https", f_probe_https), ("http", f_probe_http),
+                                   ("http8080", f_probe_8080)]:
+                    lbl, entry = fut[host].result()
+                    if entry:
+                        http_data[label] = entry
+
+            # Assemble accessibility verdict from flat results
+            http_ok, http_status     = f_http_chk[host].result()
+            https_ok, https_status   = f_https_chk[host].result()
+            accessibility = _build_accessibility(
+                f_ping[host].result(),
+                f_tcp[host].result(),
+                http_ok, http_status,
+                https_ok, https_status,
+                f_dns_chk[host].result(),
+            )
+
             enriched[host] = {
                 "ip":            ip,
                 "info":          f_info[host].result(),
-                "http":          f_http[host].result() if do_http else {},
+                "http":          http_data,
                 "ssl":           f_ssl[host].result() if do_ssl else {},
                 "rdns":          f_rdns[host].result() if do_rdns else "",
                 "shodan":        shodan_data,
                 "ports":         ports,
                 "cloudflare":    is_cloudflare_ip(ip),
-                "accessibility": f_access[host].result(),
+                "accessibility": accessibility,
             }
     return enriched
 

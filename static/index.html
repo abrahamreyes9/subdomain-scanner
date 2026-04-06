@@ -278,8 +278,11 @@
   html.light .port-danger { background:#fee2e2; color:#991b1b; }
 
   /* ── Redirect chain ── */
-  .redirect-chain { font-size:11px; color:var(--dim); font-family:monospace; }
+  .redirect-chain { font-size:11px; color:var(--dim); font-family:monospace; word-break: break-all; }
   .redirect-chain span { color:var(--amber); }
+  .redirect-url { color: var(--accent); text-decoration: none; }
+  .redirect-url:hover { text-decoration: underline; }
+  .final-url { font-weight: 600; }
 
   /* ── Takeover warning ── */
   .takeover-banner { background:rgba(239,68,68,.08); border:1px solid var(--red);
@@ -1282,11 +1285,15 @@ function buildServices(http, ssl) {
     out += '</div>';
     if (svc.redirects?.length) {
       out += `<div class="redirect-chain">↳ `;
-      out += svc.redirects.map((r, i) =>
-        i < svc.redirects.length - 1
-          ? `<span class="status s3">${r.status}</span> ${h(r.url)} →`
-          : `<span class="status s2">${r.status}</span> ${h(r.url)}`
-      ).join(' ');
+      out += svc.redirects.map((r, i) => {
+        const link = r.url ? `<a href="${h(r.url)}" target="_blank" rel="noopener" class="redirect-url">${h(r.url)}</a>` : '';
+        return i < svc.redirects.length - 1
+          ? `<span class="status s3">${r.status}</span> ${link} →`
+          : `<span class="status s3">${r.status}</span> ${link}`;
+      }).join(' ');
+      if (svc.final_url) {
+        out += ` → <span class="status s2">${svc.final_status}</span> <a href="${h(svc.final_url)}" target="_blank" rel="noopener" class="redirect-url final-url">${h(svc.final_url)}</a>`;
+      }
       out += `</div>`;
     }
     for (const t of (svc.tech || [])) out += `<span class="tech-tag">${h(t)}</span>`;
