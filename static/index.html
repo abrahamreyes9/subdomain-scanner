@@ -383,6 +383,38 @@
     .soa-grid .k { border-bottom: none; padding-bottom: 2px; font-size: 11px; }
     .soa-grid .v { padding-top: 2px; margin-bottom: 8px; }
   }
+
+  /* Dashboard cards */
+  .dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+               gap: 12px; padding: 16px 24px; border-top: 1px solid var(--border); }
+  .dash-section { margin-top: 0; }
+  .dash-section-label { padding: 12px 24px 6px; font-size: 11px; font-weight: 700;
+                        text-transform: uppercase; letter-spacing: .08em;
+                        color: var(--dim); border-top: 1px solid var(--border);
+                        margin-top: 4px; }
+  .dash-card { background: var(--surface2); border: 1px solid var(--border);
+               border-radius: 10px; padding: 14px 12px; display: flex;
+               flex-direction: column; gap: 4px; text-align: center; }
+  .dash-card-label { font-size: 11px; font-weight: 600; text-transform: uppercase;
+                     letter-spacing: .05em; color: var(--dim); }
+  .dash-card-value { font-size: 32px; font-weight: 800;
+                     font-variant-numeric: tabular-nums; line-height: 1;
+                     color: var(--text); }
+  .dash-card-value.green { color: var(--green); }
+  .dash-card-value.amber { color: var(--amber); }
+  .dash-card-value.red { color: var(--red); }
+
+  /* Software panel */
+  .software-panel { padding: 16px 24px; border-top: 1px solid var(--border); }
+  .software-panel h3 { font-size: 13px; font-weight: 700; color: var(--dim);
+                       text-transform: uppercase; letter-spacing: .06em;
+                       margin-bottom: 12px; }
+  .software-badges { display: flex; flex-wrap: wrap; gap: 8px; }
+  .sw-badge { display: inline-flex; align-items: center; gap: 6px;
+              padding: 6px 12px; border-radius: 18px; font-size: 13px;
+              font-weight: 600; background: var(--surface2); border: 1px solid var(--border);
+              color: var(--text); }
+  .sw-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 </style>
 </head>
 <body>
@@ -479,6 +511,12 @@
         <div id="takeover-list"></div>
       </div>
     </div>
+
+    <!-- Dashboard stat cards -->
+    <div id="dashboard-grid" class="dash-grid"></div>
+
+    <!-- Software detected panel -->
+    <div id="software-panel" class="software-panel" style="display:none"></div>
   </div>
 
   <!-- Final Report -->
@@ -630,6 +668,7 @@ function toggleTheme() {
 let enrichedData = {};   // host → enriched event
 let dnsData      = {};
 let whoisData    = {};
+let sourceCounts = { passive: 0, brute: 0, permutation: 0, axfr: 0 };
 let domain       = '';
 let es           = null;
 
@@ -690,6 +729,7 @@ function handleEvent(e) {
   else if (ev.type === 'subdomain') {
     addLiveRow(ev.host, ev.ip, ev.source);
     inc('stat-found');
+    sourceCounts[ev.source] = (sourceCounts[ev.source] || 0) + 1;
   }
 
   else if (ev.type === 'enriched') {
@@ -725,6 +765,129 @@ function handleEvent(e) {
   }
 }
 
+// ── TXT Services Lookup ────────────────────────────────────────────────────────
+const TXT_SERVICES = [
+  { prefix: 'adobe-idp-site-verification',           name: 'Adobe',             color: '#FF0000' },
+  { prefix: 'adobe-sign-verification',               name: 'Adobe Sign',        color: '#FF0000' },
+  { prefix: 'amazonses:',                            name: 'Amazon SES',        color: '#FF9900' },
+  { prefix: 'anthropic-domain-verification',         name: 'Anthropic',         color: '#cc785c' },
+  { prefix: 'atlassian-domain-verification',         name: 'Atlassian',         color: '#0052CC' },
+  { prefix: 'docusign=',                             name: 'DocuSign',          color: '#0070BA' },
+  { prefix: 'figma-domain-verification',             name: 'Figma',             color: '#F24E1E' },
+  { prefix: 'dell-technologies-domain-verification', name: 'Dell Technologies', color: '#007DB8' },
+  { prefix: 'ms=',                                   name: 'Microsoft 365',     color: '#00A4EF' },
+  { prefix: 'google-site-verification',              name: 'Google Workspace',  color: '#4285F4' },
+  { prefix: 'stripe-verification=',                  name: 'Stripe',            color: '#635BFF' },
+  { prefix: 'hubspot-developer-verification',        name: 'HubSpot',           color: '#FF7A59' },
+  { prefix: 'facebook-domain-verification',          name: 'Facebook',          color: '#1877F2' },
+  { prefix: 'dropbox-domain-verification=',          name: 'Dropbox',           color: '#0061FE' },
+  { prefix: 'zoho-verification=',                    name: 'Zoho',              color: '#E42527' },
+  { prefix: 'sendgrid_',                             name: 'SendGrid',          color: '#1A82E2' },
+  { prefix: 'mailgun-verify',                        name: 'Mailgun',           color: '#F06B00' },
+  { prefix: 'asv=',                                  name: 'Audit Scout',       color: '#6366f1' },
+];
+
+// ── Build dashboard ────────────────────────────────────────────────────────────
+function buildDashboard() {
+  const grid = document.getElementById('dashboard-grid');
+  grid.innerHTML = '';
+
+  const total = Object.keys(enrichedData).length;
+  const confirmed = Object.values(enrichedData).filter(d => d.accessibility?.status === 'confirmed').length;
+  const detected = total - confirmed;
+  const takeoverCount = Object.values(enrichedData).filter(d => d.takeover).length;
+
+  // Compute cert stats (matching donut chart categories)
+  let cert30 = 0, cert90 = 0, cert180 = 0, certLong = 0;
+  for (const host of Object.values(enrichedData)) {
+    const days = host.ssl?.days_remaining;
+    if (days === undefined) continue;
+    if (days <= 30) cert30++;
+    else if (days <= 90) cert90++;
+    else if (days <= 180) cert180++;
+    else certLong++;
+  }
+
+  // Row A: Core counts
+  const rowA = document.createElement('div');
+  rowA.className = 'dash-section';
+  rowA.innerHTML = `
+    <div class="dash-card"><div class="dash-card-label">Subdomains Found</div><div class="dash-card-value">${total}</div></div>
+    <div class="dash-card"><div class="dash-card-label">Confirmed Online</div><div class="dash-card-value green">${confirmed}</div></div>
+    <div class="dash-card"><div class="dash-card-label">Detected (Unverified)</div><div class="dash-card-value amber">${detected}</div></div>
+    <div class="dash-card"><div class="dash-card-label">Takeover Risks</div><div class="dash-card-value red">${takeoverCount}</div></div>
+  `;
+  grid.appendChild(rowA);
+
+  // Row B: Source breakdown
+  if (sourceCounts.passive > 0 || sourceCounts.brute > 0 || sourceCounts.permutation > 0 || sourceCounts.axfr > 0) {
+    const label = document.createElement('div');
+    label.className = 'dash-section-label';
+    label.textContent = 'Source Breakdown';
+    grid.appendChild(label);
+
+    const rowB = document.createElement('div');
+    rowB.className = 'dash-section';
+    let html = '';
+    if (sourceCounts.passive > 0) html += `<div class="dash-card"><div class="dash-card-label">Passive Sources</div><div class="dash-card-value">${sourceCounts.passive}</div></div>`;
+    if (sourceCounts.brute > 0) html += `<div class="dash-card"><div class="dash-card-label">Brute Force</div><div class="dash-card-value">${sourceCounts.brute}</div></div>`;
+    if (sourceCounts.permutation > 0) html += `<div class="dash-card"><div class="dash-card-label">Permutations</div><div class="dash-card-value">${sourceCounts.permutation}</div></div>`;
+    if (sourceCounts.axfr > 0) html += `<div class="dash-card"><div class="dash-card-label">Zone Transfer</div><div class="dash-card-value">${sourceCounts.axfr}</div></div>`;
+    rowB.innerHTML = html;
+    grid.appendChild(rowB);
+  }
+
+  // Row C: Certificate expiry (matching donut chart thresholds)
+  const label = document.createElement('div');
+  label.className = 'dash-section-label';
+  label.textContent = 'Certificate Expiry';
+  grid.appendChild(label);
+
+  const rowC = document.createElement('div');
+  rowC.className = 'dash-section';
+  rowC.innerHTML = `
+    <div class="dash-card"><div class="dash-card-label">&le; 30 days</div><div class="dash-card-value red">${cert30}</div></div>
+    <div class="dash-card"><div class="dash-card-label">&le; 90 days</div><div class="dash-card-value amber">${cert90}</div></div>
+    <div class="dash-card"><div class="dash-card-label">&le; 180 days</div><div class="dash-card-value" style="color:#f59e0b">${cert180}</div></div>
+    <div class="dash-card"><div class="dash-card-label">180+ days</div><div class="dash-card-value green">${certLong}</div></div>
+  `;
+  grid.appendChild(rowC);
+}
+
+// ── Build software detection ────────────────────────────────────────────────────
+function buildSoftwarePanel() {
+  const panel = document.getElementById('software-panel');
+  const txt = dnsData?.txt || [];
+  if (!txt.length) {
+    panel.style.display = 'none';
+    return;
+  }
+
+  const detected = new Set();
+  for (const record of txt) {
+    for (const svc of TXT_SERVICES) {
+      if (record.toLowerCase().includes(svc.prefix.toLowerCase())) {
+        detected.add(JSON.stringify(svc));
+        break;
+      }
+    }
+  }
+
+  if (!detected.size) {
+    panel.style.display = 'none';
+    return;
+  }
+
+  panel.style.display = 'block';
+  const services = Array.from(detected).map(s => JSON.parse(s));
+  let html = '<h3>Software Detected via TXT Records</h3><div class="software-badges">';
+  for (const svc of services) {
+    html += `<div class="sw-badge"><div class="sw-dot" style="background-color:${svc.color}"></div>${h(svc.name)}</div>`;
+  }
+  html += '</div>';
+  panel.innerHTML = html;
+}
+
 // ── Finish ─────────────────────────────────────────────────────────────────────
 function finishScan() {
   if (es) { es.close(); es = null; }
@@ -737,6 +900,8 @@ function finishScan() {
   ['whois','dns','passive','brute','resolve','enrich'].forEach(markPhaseDone);
 
   buildReport();
+  buildDashboard();
+  buildSoftwarePanel();
   document.getElementById('report').style.display = 'block';
 
   // Show completion card
@@ -1636,6 +1801,7 @@ function initResizableColumns(table) {
 
 function reset() {
   enrichedData = {}; dnsData = {}; whoisData = {};
+  sourceCounts = { passive: 0, brute: 0, permutation: 0, axfr: 0 };
   document.getElementById('live-tbody').innerHTML      = '';
   document.getElementById('activity-log').innerHTML    = '';
   document.getElementById('confirmed-tbody').innerHTML = '';
@@ -1644,6 +1810,8 @@ function reset() {
   document.getElementById('stat-enriched').textContent = '0';
   document.getElementById('feed-pulse').style.display  = '';
   document.getElementById('complete-card').style.display   = 'none';
+  document.getElementById('dashboard-grid').innerHTML = '';
+  document.getElementById('software-panel').style.display = 'none';
   document.getElementById('summary-panels').style.display  = 'none';
   document.getElementById('detected-section').style.display = 'none';
   document.getElementById('surface-donut').innerHTML = '';
