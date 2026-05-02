@@ -6,6 +6,5 @@ venv/
 *_report.*
 .git/
 *.md
-*.html
 *.csv
 .gitignore
