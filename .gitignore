@@ -13,3 +13,6 @@ ENV/
 
 # OS files
 .DS_Store
+
+# Duplicate enumerator (original CLI version)
+static/subdomain_enum.py

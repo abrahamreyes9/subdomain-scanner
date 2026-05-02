@@ -13,11 +13,11 @@ class Config:
     max_workers: int = 100
     max_dns_workers: int = 50
     max_http_workers: int = 50
-    enrich_threads: int = 50
+    enrich_threads: int = 100
 
     # Rate-limit & timeouts
-    dns_rate: float = 0.05           # seconds between DNS queries (token bucket)
-    dns_burst: int = 20              # token bucket burst capacity
+    dns_rate: float = 0.01           # seconds between DNS queries (100 queries/sec)
+    dns_burst: int = 50              # token bucket burst capacity
     wayback_delay: float = 1.0       # polite pause before Wayback requests
     http_timeout: float = 8.0        # seconds per HTTP request
     retry_backoff: list[int] = field(default_factory=lambda: [1, 2, 4])
