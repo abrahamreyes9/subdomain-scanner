@@ -59,7 +59,8 @@ async def start_scan(req: ScanRequest):
         _scans.pop(k, None)
 
     shodan_key = os.getenv("SHODAN_API_KEY")
-    thread = threading.Thread(target=run_scan, args=(domain, q, 100, 50, shodan_key), daemon=True)
+    thread = threading.Thread(target=run_scan, args=(domain, q),
+                              kwargs={"shodan_key": shodan_key}, daemon=True)
     thread.start()
 
     return {"scan_id": scan_id}
