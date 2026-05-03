@@ -112,28 +112,53 @@ def get_nameservers(domain: str) -> list[str]:
         return []
 
 
-def attempt_zone_transfer(domain: str, nameservers: list[str]) -> set[str]:
-    """Try AXFR zone transfer against each nameserver."""
-    found = set()
-    for ns in nameservers:
+def attempt_zone_transfer(domain: str, nameservers: list[str],
+                          per_ns_timeout: float = 5.0) -> set[str]:
+    """Try AXFR zone transfer against each nameserver in parallel.
+
+    per_ns_timeout caps each NS attempt at the wall-clock level. dnspython's
+    own `timeout` arg is per-packet, so a non-responding NS can stall well
+    past it; this future-level timeout guarantees discovery doesn't block.
+    """
+    if not nameservers:
+        return set()
+
+    def _try_one(ns: str) -> set[str]:
+        out: set[str] = set()
         try:
             ns_ip = fast_resolve(ns)
             if not ns_ip:
-                continue
-            z = dns.zone.from_xfr(dns.query.xfr(ns_ip, domain, timeout=10))
+                return out
+            z = dns.zone.from_xfr(dns.query.xfr(ns_ip, domain,
+                                                timeout=per_ns_timeout,
+                                                lifetime=per_ns_timeout))
             for name in z.nodes.keys():
                 host = str(name)
                 if host == "@":
                     continue
-                full = f"{host}.{domain}".lower()
-                found.add(full)
-            print(f"    [!] Zone transfer succeeded on {ns} — {len(found)} records leaked!")
+                out.add(f"{host}.{domain}".lower())
+            print(f"    [!] Zone transfer succeeded on {ns} — {len(out)} records leaked!")
         except dns.exception.FormError:
             pass  # AXFR refused (expected)
         except dns.resolver.NXDOMAIN:
             pass  # Expected for non-existent domains
         except Exception as e:
             print(f"[DEBUG] Minor error ignored: {type(e).__name__}: {e}")
+        return out
+
+    found: set[str] = set()
+    ex = ThreadPoolExecutor(max_workers=max(1, len(nameservers)))
+    try:
+        futures = [ex.submit(_try_one, ns) for ns in nameservers]
+        for fut in futures:
+            try:
+                found |= fut.result(timeout=per_ns_timeout + 2.0)
+            except Exception:
+                # Hard wall-clock cap: hung NS doesn't block discovery.
+                pass
+    finally:
+        # Don't wait — leaked daemon worker(s) on hung sockets exit later.
+        ex.shutdown(wait=False)
     return found
 
 
@@ -838,27 +863,33 @@ TECH_PATTERNS = [
     ("body",            r"amazonaws\.com",      "Amazon Web Services"),
 ]
 
+# Pre-compiled patterns + a per-label deduped iteration order
+_TECH_COMPILED = [(source, re.compile(pattern, re.I), label)
+                  for source, pattern, label in TECH_PATTERNS]
+_TITLE_RE = re.compile(r"<title[^>]*>([^<]{1,120})", re.I)
+
+
 def _get_title(html: str) -> str:
-    m = re.search(r"<title[^>]*>([^<]{1,120})", html, re.I)
+    m = _TITLE_RE.search(html)
     return m.group(1).strip() if m else ""
 
 
 def _detect_tech(headers: dict, body: str) -> list[str]:
     found = []
-    body_lower = body[:50000].lower()
+    body_slice = body[:50000]
     seen = set()
-    for source, pattern, label in TECH_PATTERNS:
+    for source, pattern, label in _TECH_COMPILED:
         if label in seen:
             continue
         if source == "body":
-            if re.search(pattern, body_lower):
-                found.append(label)
-                seen.add(label)
+            target = body_slice
         else:
-            val = headers.get(source, "").lower()
-            if val and re.search(pattern, val):
-                found.append(label)
-                seen.add(label)
+            target = headers.get(source, "")
+            if not target:
+                continue
+        if pattern.search(target):
+            found.append(label)
+            seen.add(label)
     return found
 
 
@@ -973,17 +1004,21 @@ def _ping_host(host: str, timeout: int = 4) -> bool:
         return False
 
 
+def _tcp_check_one(ip: str, port: int, timeout: float = 3.0) -> int | None:
+    """Return port if TCP connect succeeds, else None."""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return port
+    except (OSError, socket.timeout):
+        return None
+
+
 def _tcp_check_ports(ip: str, ports: tuple[int, ...] = _VERIFY_PORTS,
                      timeout: float = 3.0) -> list[int]:
-    """Return list of ports that accept a TCP connection."""
-    open_ports: list[int] = []
-    for port in ports:
-        try:
-            with socket.create_connection((ip, port), timeout=timeout):
-                open_ports.append(port)
-        except (OSError, socket.timeout):
-            continue
-    return open_ports
+    """Return list of ports that accept a TCP connection (parallel)."""
+    with ThreadPoolExecutor(max_workers=len(ports)) as ex:
+        results = ex.map(lambda p: _tcp_check_one(ip, p, timeout), ports)
+    return [p for p in results if p is not None]
 
 
 def _http_check(host: str, scheme: str = "http", timeout: float = 3.0) -> tuple[bool, int | None]:
@@ -1060,65 +1095,77 @@ def collect_enrichment(
     do_ports: bool = True,
     nmap_top_ports: int = 20,
     enrich_limit: int = 0,
+    on_host_complete=None,
 ) -> dict[str, dict]:
     """Enrich all resolved hosts using a single flat thread pool.
 
-    All sub-tasks — IP info, HTTP probes (parallelised per-scheme), SSL cert,
-    rDNS, Shodan, and accessibility checks — are submitted directly to one
-    pool.  No nested executors, no per-host pool spin-up.
-    Port scanning (nmap or socket fallback) runs in parallel with them.
+    Streams results: invokes on_host_complete(host, data) as soon as each
+    host finishes, then returns the full dict at the end (CLI compat).
+
+    Eliminates duplicate work versus the prior version: no separate
+    _http_check (probe results carry status), no _dns_cross_check (host is
+    resolved by definition), and TCP probes only check ports not already
+    proven reachable by HTTP probes.
     """
     items = sorted(resolved.items())
     if enrich_limit > 0:
         items = items[:enrich_limit]
+    item_ip = dict(items)
     enriched: dict[str, dict] = {}
 
-    # Kick off nmap in a background thread so it overlaps with enrichment
+    if not items:
+        return enriched
+
+    # Ports the HTTP probe layer already covers — skip duplicate TCP probes.
+    _PROBED_PORTS = {80, 443, 8080}
+    _EXTRA_TCP_PORTS = tuple(p for p in _VERIFY_PORTS if p not in _PROBED_PORTS)
+
+    # Kick off nmap in a background thread so it overlaps with enrichment.
     unique_ips = list({ip for _, ip in items})
     nmap_executor = ThreadPoolExecutor(max_workers=1) if do_ports else None
     nmap_future = (nmap_executor.submit(nmap_scan_ips, unique_ips, nmap_top_ports)
                    if nmap_executor else None)
 
-    with ThreadPoolExecutor(max_workers=threads) as ex:
-        f_info = {host: ex.submit(get_ip_info, ip) for host, ip in items}
+    pool = ThreadPoolExecutor(max_workers=threads)
+    try:
+        # Per-host future map: host -> dict(key -> Future)
+        host_futures: dict[str, dict[str, "Future"]] = {h: {} for h, _ in items}
+        # Reverse index: future -> (host, key)
+        fut_index: dict["Future", tuple[str, str]] = {}
 
-        # HTTP probes — each scheme submitted independently (was sequential)
-        f_probe_https = ({host: ex.submit(_probe_one, _http_session, "https", 443, host, http_timeout)
-                          for host, _ in items} if do_http else {})
-        f_probe_http  = ({host: ex.submit(_probe_one, _http_session, "http", 80, host, http_timeout)
-                          for host, _ in items} if do_http else {})
-        f_probe_8080  = ({host: ex.submit(_probe_one, _http_session, "http", 8080, host, http_timeout)
-                          for host, _ in items} if do_http else {})
+        def submit(host: str, key: str, fn, *args):
+            f = pool.submit(fn, *args)
+            host_futures[host][key] = f
+            fut_index[f] = (host, key)
 
-        f_ssl  = ({host: ex.submit(get_ssl_cert_info, host, ssl_timeout) for host, _ in items}
-                  if do_ssl else {})
-        f_rdns = ({host: ex.submit(reverse_dns, ip) for host, ip in items}
-                  if do_rdns else {})
-        f_shodan = ({host: ex.submit(get_shodan_internetdb, ip, shodan_timeout) for host, ip in items}
-                    if do_shodan else {})
+        for host, ip in items:
+            submit(host, "info", get_ip_info, ip)
+            if do_http:
+                submit(host, "https",     _probe_one, _http_session, "https", 443, host, http_timeout)
+                submit(host, "http",      _probe_one, _http_session, "http",  80,  host, http_timeout)
+                submit(host, "http8080",  _probe_one, _http_session, "http",  8080, host, http_timeout)
+            if do_ssl:
+                submit(host, "ssl", get_ssl_cert_info, host, ssl_timeout)
+            if do_rdns:
+                submit(host, "rdns", reverse_dns, ip)
+            if do_shodan:
+                submit(host, "shodan", get_shodan_internetdb, ip, shodan_timeout)
+            submit(host, "ping", _ping_host, host)
+            for port in _EXTRA_TCP_PORTS:
+                submit(host, f"tcp_{port}", _tcp_check_one, ip, port, http_timeout)
 
-        # Accessibility checks — flat in this pool (no nested executor)
-        f_ping       = {host: ex.submit(_ping_host, host) for host, _ in items}
-        f_tcp        = {host: ex.submit(_tcp_check_ports, ip, _VERIFY_PORTS, http_timeout)
-                        for host, ip in items}
-        f_http_chk   = {host: ex.submit(_http_check, host, "http", http_timeout)
-                        for host, _ in items}
-        f_https_chk  = {host: ex.submit(_http_check, host, "https", http_timeout)
-                        for host, _ in items}
-        f_dns_chk    = {host: ex.submit(_dns_cross_check, host) for host, _ in items}
-
-        # Collect nmap results (blocks only if nmap is slower than enrichment)
+        # Block on nmap (with a generous cap) so the per-host build has ports.
         nmap_results: dict[str, list[int]] = {}
         if nmap_future:
             try:
-                nmap_results = nmap_future.result(timeout=35)
+                nmap_results = nmap_future.result(timeout=35) or {}
             except Exception:
                 nmap_results = {}
             nmap_executor.shutdown(wait=False)
 
-        # Socket fallback if nmap unavailable and returned nothing
+        # Socket-scan fallback if nmap unavailable and returned nothing
         if do_ports and not nmap_results and not shutil.which("nmap"):
-            sock_futures = {ip: ex.submit(_socket_scan_ip, ip) for ip in unique_ips}
+            sock_futures = {ip: pool.submit(_socket_scan_ip, ip) for ip in unique_ips}
             for ip, fut in sock_futures.items():
                 try:
                     ports = fut.result()
@@ -1127,44 +1174,92 @@ def collect_enrichment(
                 except Exception:
                     continue
 
-        # Collect results inside the context so futures are guaranteed complete
-        for host, ip in items:
-            shodan_data = f_shodan[host].result() if do_shodan else {}
+        # Stream completions per host. We yield a host as soon as ALL of its
+        # primary futures are done; nmap is shared and already collected above.
+        host_pending = {h: len(fmap) for h, fmap in host_futures.items()}
+
+        for fut in as_completed(list(fut_index.keys())):
+            host, _key = fut_index[fut]
+            host_pending[host] -= 1
+            if host_pending[host] != 0:
+                continue
+
+            ip = item_ip[host]
+            fmap = host_futures[host]
+
+            def _r(key, default=None):
+                f = fmap.get(key)
+                if f is None:
+                    return default
+                try:
+                    return f.result()
+                except Exception:
+                    return default
+
+            # HTTP probes: each returns (label, entry|None)
+            http_data: dict = {}
+            for key in ("https", "http", "http8080"):
+                pr = _r(key)
+                if pr:
+                    _lbl, entry = pr
+                    if entry:
+                        http_data[key] = entry
+
+            https_pr = _r("https") or (None, None)
+            http_pr  = _r("http") or (None, None)
+            https_entry = https_pr[1] if https_pr else None
+            http_entry  = http_pr[1] if http_pr else None
+            https_ok = bool(https_entry)
+            http_ok  = bool(http_entry)
+            https_status = https_entry.get("status") if isinstance(https_entry, dict) else None
+            http_status  = http_entry.get("status")  if isinstance(http_entry, dict)  else None
+
+            # Assemble tcp_ports: HTTP-proven + TCP-proven (8443, 22).
+            tcp_ports: list[int] = []
+            if https_ok:
+                tcp_ports.append(443)
+            if http_ok:
+                tcp_ports.append(80)
+            if isinstance(_r("http8080"), tuple) and _r("http8080")[1]:
+                tcp_ports.append(8080)
+            for port in _EXTRA_TCP_PORTS:
+                if _r(f"tcp_{port}") is not None:
+                    tcp_ports.append(port)
+            tcp_ports = sorted(set(tcp_ports))
+
+            shodan_data = _r("shodan", {}) or {}
             ports = nmap_results.get(ip, [])
             if not ports and shodan_data.get("ports"):
                 ports = shodan_data["ports"]
 
-            # Assemble HTTP probe results (was one call, now three parallel)
-            http_data: dict = {}
-            if do_http:
-                for label, fut in [("https", f_probe_https), ("http", f_probe_http),
-                                   ("http8080", f_probe_8080)]:
-                    lbl, entry = fut[host].result()
-                    if entry:
-                        http_data[label] = entry
-
-            # Assemble accessibility verdict from flat results
-            http_ok, http_status     = f_http_chk[host].result()
-            https_ok, https_status   = f_https_chk[host].result()
             accessibility = _build_accessibility(
-                f_ping[host].result(),
-                f_tcp[host].result(),
+                _r("ping", False),
+                tcp_ports,
                 http_ok, http_status,
                 https_ok, https_status,
-                f_dns_chk[host].result(),
+                True,  # dns_ok: host is resolved by definition
             )
 
-            enriched[host] = {
+            data = {
                 "ip":            ip,
-                "info":          f_info[host].result(),
+                "info":          _r("info", {}) or {},
                 "http":          http_data,
-                "ssl":           f_ssl[host].result() if do_ssl else {},
-                "rdns":          f_rdns[host].result() if do_rdns else "",
+                "ssl":           _r("ssl", {}) or {} if do_ssl else {},
+                "rdns":          _r("rdns", "") or "" if do_rdns else "",
                 "shodan":        shodan_data,
                 "ports":         ports,
                 "cloudflare":    is_cloudflare_ip(ip),
                 "accessibility": accessibility,
             }
+            enriched[host] = data
+            if on_host_complete:
+                try:
+                    on_host_complete(host, data)
+                except Exception:
+                    pass
+    finally:
+        pool.shutdown(wait=True)
+
     return enriched
 
 

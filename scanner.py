@@ -68,231 +68,185 @@ def run_scan(domain: str, q: queue.Queue,
         found: set[str] = set()
         resolved: dict[str, str] = {}
 
-        # ── Phase 0: WHOIS ────────────────────────────────────────────────────
-        emit({"type": "phase", "phase": "whois", "message": "Running WHOIS lookup..."})
-        whois_data = fetch_whois(domain)
-        if whois_data.get("registrar"):
-            emit({"type": "status", "message": f"Registrar: {whois_data['registrar']}"})
-        if whois_data.get("creation_date"):
-            emit({"type": "status", "message": f"Created: {whois_data['creation_date']}  Expires: {whois_data.get('expiry_date', '?')}"})
-        if whois_data.get("name_servers"):
-            emit({"type": "status", "message": f"Name servers: {', '.join(whois_data['name_servers'][:4])}"})
-        emit({"type": "whois", "data": whois_data})
-
-        if ctx.cancelled:
-            return
-
-        # ── Phase 1: DNS ──────────────────────────────────────────────────────
-        emit({"type": "phase", "phase": "dns", "message": "Fetching nameservers..."})
-
-        nameservers = get_nameservers(domain)
-        if nameservers:
-            emit({"type": "status", "message": f"Nameservers: {', '.join(nameservers)}"})
-        else:
-            emit({"type": "status", "message": "No nameservers found"})
-
-        emit({"type": "status", "message": f"Attempting zone transfer (AXFR) on {len(nameservers)} nameserver(s)..."})
-        axfr = attempt_zone_transfer(domain, nameservers)
-        if axfr:
-            found |= axfr
-            emit({"type": "status", "message": f"Zone transfer succeeded — {len(axfr)} records leaked!"})
-        else:
-            emit({"type": "status", "message": "Zone transfer refused (expected)"})
-
-        emit({"type": "status", "message": "Querying NS / MX / TXT / SRV records..."})
-        dns_sub = extract_dns_subdomains(domain)
-        found |= dns_sub
-        emit({"type": "status", "message": f"DNS records yielded {len(dns_sub)} subdomain(s)"})
-
-        # Collect MX / NS / TXT / SOA records
-        emit({"type": "status", "message": "Collecting MX / NS / TXT / SOA records..."})
-        dns_data = collect_dns_records(domain)
-        mx_count  = len(dns_data.get("mx", []))
-        ns_count  = len(dns_data.get("ns", []))
-        txt_count = len(dns_data.get("txt", []))
-        emit({"type": "status", "message": f"MX: {mx_count}  NS: {ns_count}  TXT: {txt_count}"})
-        emit({"type": "dns", "data": dns_data})
-
-        emit({"type": "status", "message": f"Total unique so far: {len(found)}"})
-
-        if ctx.cancelled:
-            return
-
-        # ── Phase 2: Passive sources ──────────────────────────────────────────
+        # ── Phase 0+1+2: Discovery (WHOIS, DNS, AXFR, passive) in parallel ───
         passive_sources = ["crt.sh", "HackerTarget"]
         if cfg.enable_wayback:
             passive_sources.append("Wayback")
-        emit({"type": "phase", "phase": "passive",
-              "message": f"Querying passive sources ({', '.join(passive_sources)})..."})
+        emit({"type": "phase", "phase": "whois",
+              "message": f"Running WHOIS, DNS, and passive sources ({', '.join(passive_sources)}) in parallel..."})
 
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            f_crt = ex.submit(fetch_crtsh, domain)
-            f_ht  = ex.submit(fetch_hackertarget, domain)
-            f_wb  = (ex.submit(fetch_wayback, domain, cfg.max_wayback,
-                               cfg.wayback_delay, 30.0, cfg.user_agent)
-                     if cfg.enable_wayback else None)
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            f_whois     = ex.submit(fetch_whois, domain)
+            f_ns        = ex.submit(get_nameservers, domain)
+            f_dns_sub   = ex.submit(extract_dns_subdomains, domain)
+            f_dns_data  = ex.submit(collect_dns_records, domain)
+            f_crt       = ex.submit(fetch_crtsh, domain)
+            f_ht        = ex.submit(fetch_hackertarget, domain)
+            f_wb        = (ex.submit(fetch_wayback, domain, cfg.max_wayback,
+                                      cfg.wayback_delay, 30.0, cfg.user_agent)
+                           if cfg.enable_wayback else None)
+            f_wildcard  = ex.submit(detect_wildcard, domain)
 
+            # WHOIS
+            whois_data = _safe_result(f_whois, "WHOIS", ctx) or {}
+            if isinstance(whois_data, set):  # _safe_result returns set on failure
+                whois_data = {}
+            if whois_data.get("registrar"):
+                emit({"type": "status", "message": f"Registrar: {whois_data['registrar']}"})
+            if whois_data.get("creation_date"):
+                emit({"type": "status", "message": f"Created: {whois_data['creation_date']}  Expires: {whois_data.get('expiry_date', '?')}"})
+            if whois_data.get("name_servers"):
+                emit({"type": "status", "message": f"Name servers: {', '.join(whois_data['name_servers'][:4])}"})
+            emit({"type": "whois", "data": whois_data})
+
+            # DNS phase highlight
+            emit({"type": "phase", "phase": "dns", "message": "Resolving DNS records..."})
+
+            # Nameservers → AXFR (depends on f_ns; chained inside the same pool)
+            try:
+                nameservers = f_ns.result() or []
+            except Exception:
+                nameservers = []
+            if nameservers:
+                emit({"type": "status", "message": f"Nameservers: {', '.join(nameservers)}"})
+            else:
+                emit({"type": "status", "message": "No nameservers found"})
+
+            f_axfr = ex.submit(attempt_zone_transfer, domain, nameservers) if nameservers else None
+            if f_axfr:
+                emit({"type": "status",
+                      "message": f"Attempting zone transfer (AXFR) on {len(nameservers)} nameserver(s)..."})
+
+            # DNS records (NS/MX/TXT/SRV)
+            dns_sub = _safe_result(f_dns_sub, "DNS records", ctx)
+            found |= dns_sub
+            emit({"type": "status", "message": f"DNS records yielded {len(dns_sub)} subdomain(s)"})
+
+            # MX / NS / TXT / SOA detail
+            try:
+                dns_data = f_dns_data.result()
+            except Exception as e:
+                ctx.emit({"type": "warning", "message": f"DNS detail failed: {e}"})
+                dns_data = {}
+            mx_count  = len(dns_data.get("mx", []))
+            ns_count  = len(dns_data.get("ns", []))
+            txt_count = len(dns_data.get("txt", []))
+            emit({"type": "status", "message": f"MX: {mx_count}  NS: {ns_count}  TXT: {txt_count}"})
+            emit({"type": "dns", "data": dns_data})
+
+            # AXFR result
+            if f_axfr:
+                axfr = _safe_result(f_axfr, "AXFR", ctx)
+                if axfr:
+                    found |= axfr
+                    emit({"type": "status", "message": f"Zone transfer succeeded — {len(axfr)} records leaked!"})
+                else:
+                    emit({"type": "status", "message": "Zone transfer refused (expected)"})
+
+            # Passive sources
+            emit({"type": "phase", "phase": "passive",
+                  "message": "Collecting passive source results..."})
             crt = _safe_result(f_crt, "crt.sh", ctx)
             ht  = _safe_result(f_ht,  "HackerTarget", ctx)
             wb  = _safe_result(f_wb,  "Wayback Machine", ctx) if f_wb else set()
+            found |= crt | ht | wb
+            emit({"type": "status", "message": f"crt.sh: {len(crt)} subdomains"})
+            emit({"type": "status", "message": f"HackerTarget: {len(ht)} subdomains"})
+            if cfg.enable_wayback:
+                emit({"type": "status", "message": f"Wayback Machine: {len(wb)} subdomains"})
 
-        found |= crt | ht | wb
-        emit({"type": "status", "message": f"crt.sh: {len(crt)} subdomains"})
-        emit({"type": "status", "message": f"HackerTarget: {len(ht)} subdomains"})
-        if cfg.enable_wayback:
-            emit({"type": "status", "message": f"Wayback Machine: {len(wb)} subdomains"})
+            # Wildcard detection
+            try:
+                wildcard_ips = f_wildcard.result() or set()
+            except Exception:
+                wildcard_ips = set()
+
         emit({"type": "status", "message": f"Total unique so far: {len(found)}"})
 
         if ctx.cancelled:
             return
 
-        # ── Phase 3: Brute-force ──────────────────────────────────────────────
-        # Detect wildcard DNS before brute-forcing
-        wildcard_ips = detect_wildcard(domain)
+        # ── Phase 3+3.5+4: Unified resolution pool ────────────────────────────
+        # All resolution work (brute-force, permutations, passive/DNS) shares
+        # one ThreadPoolExecutor and one as_completed loop.  Permutations are
+        # seeded from passive results immediately rather than waiting for
+        # brute-force to finish.
         if wildcard_ips:
             emit({"type": "status",
                   "message": f"Wildcard DNS detected ({', '.join(wildcard_ips)}) — filtering false positives"})
 
         emit({"type": "phase", "phase": "brute",
-              "message": f"Brute-forcing {len(COMMON_SUBDOMAINS)} common subdomains..."})
+              "message": "Resolving brute-force, permutations, and passive sources..."})
 
-        candidates = [f"{w}.{domain}" for w in COMMON_SUBDOMAINS]
-        total_brute = len(candidates)
-        completed_brute = 0
+        brute_set = {f"{w}.{domain}" for w in COMMON_SUBDOMAINS}
+        passive_set = set(found)  # found currently holds passive + DNS + AXFR results
 
-        with ThreadPoolExecutor(max_workers=cfg.max_workers) as ex:
-            futures = {ex.submit(resolve, c): c for c in candidates}
-            for f in as_completed(futures):
-                if ctx.cancelled:
-                    ex.shutdown(wait=False, cancel_futures=True)
-                    return
-                result = f.result()
-                completed_brute += 1
-                if result:
-                    host, ip = result
-                    # Filter wildcard matches
-                    if wildcard_ips and ip in wildcard_ips:
-                        continue
-                    found.add(host)
-                    resolved[host] = ip
-                    emit({"type": "subdomain", "host": host, "ip": ip, "source": "brute"})
-                if completed_brute % 50 == 0 or completed_brute == total_brute:
-                    emit({"type": "progress", "phase": "brute",
-                          "done": completed_brute, "total": total_brute,
-                          "found": len(resolved)})
-
-        emit({"type": "status", "message": f"Brute-force complete — {len(resolved)} live"})
-
-        # ── Phase 3.5: Smart permutations ─────────────────────────────────────
-        if cfg.enable_permutations and found:
-            perm_candidates = generate_permutations(
-                found, domain,
+        perm_set: set[str] = set()
+        if cfg.enable_permutations and passive_set:
+            perm_set = set(generate_permutations(
+                passive_set, domain,
                 max_perms=cfg.max_permutations,
                 high_suffixes=cfg.high_value_suffixes,
                 low_suffixes=cfg.low_value_suffixes,
                 separators=cfg.permutation_separators,
-            )
+            ))
 
-            if perm_candidates:
-                emit({"type": "status",
-                      "message": f"Resolving {len(perm_candidates)} smart permutations..."})
+        # Source tag per candidate (brute > permutation > passive priority for labelling).
+        candidate_source: dict[str, str] = {}
+        for c in passive_set:
+            candidate_source[c] = "passive"
+        for c in perm_set:
+            candidate_source.setdefault(c, "permutation")
+        for c in brute_set:
+            candidate_source[c] = "brute"
 
-                total_perm = len(perm_candidates)
-                completed_perm = 0
+        total = len(candidate_source)
+        completed = 0
+        emit({"type": "status",
+              "message": f"Resolving {total} candidates "
+                         f"({len(brute_set)} brute, {len(perm_set)} permutations, "
+                         f"{len(passive_set)} passive)..."})
 
-                with ThreadPoolExecutor(max_workers=cfg.max_workers) as ex:
-                    futures = {ex.submit(resolve, c): c for c in perm_candidates}
-                    for f in as_completed(futures):
-                        if ctx.cancelled:
-                            ex.shutdown(wait=False, cancel_futures=True)
-                            return
-                        result = f.result()
-                        completed_perm += 1
-                        if result:
-                            host, ip = result
-                            if wildcard_ips and ip in wildcard_ips:
-                                continue
-                            found.add(host)
-                            resolved[host] = ip
-                            emit({"type": "subdomain", "host": host, "ip": ip,
-                                  "source": "permutation"})
-                        if completed_perm % 50 == 0 or completed_perm == total_perm:
-                            emit({"type": "progress", "phase": "brute",
-                                  "done": total_brute + completed_perm,
-                                  "total": total_brute + total_perm,
-                                  "found": len(resolved)})
-
-                emit({"type": "status",
-                      "message": f"Permutations complete — {len(resolved)} live total"})
-
-        emit({"type": "status", "message": f"Total unique so far: {len(found)}"})
-
-        if ctx.cancelled:
-            return
-
-        # ── Phase 4: Resolve passive/DNS hits not yet resolved ────────────────
-        passive_only = found - set(resolved.keys())
-        if passive_only:
-            emit({"type": "phase", "phase": "resolve",
-                  "message": f"Resolving {len(passive_only)} passive/DNS subdomains..."})
-            total_resolve = len(passive_only)
-            completed_resolve = 0
-
-            with ThreadPoolExecutor(max_workers=cfg.max_workers) as ex:
-                futures = {ex.submit(resolve, s): s for s in passive_only}
-                for f in as_completed(futures):
-                    if ctx.cancelled:
-                        ex.shutdown(wait=False, cancel_futures=True)
-                        return
+        with ThreadPoolExecutor(max_workers=cfg.max_workers) as ex:
+            futures = {ex.submit(resolve, c): c for c in candidate_source}
+            for f in as_completed(futures):
+                if ctx.cancelled:
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    return
+                completed += 1
+                cand = futures[f]
+                try:
                     result = f.result()
-                    completed_resolve += 1
-                    if result:
-                        host, ip = result
-                        if wildcard_ips and ip in wildcard_ips:
-                            continue
+                except Exception:
+                    result = None
+                if result:
+                    host, ip = result
+                    if wildcard_ips and ip in wildcard_ips:
+                        pass
+                    elif host not in resolved:
                         resolved[host] = ip
-                        emit({"type": "subdomain", "host": host, "ip": ip, "source": "passive"})
-                    if completed_resolve % 50 == 0 or completed_resolve == total_resolve:
-                        emit({"type": "progress", "phase": "resolve",
-                              "done": completed_resolve, "total": total_resolve,
-                              "found": len(resolved)})
+                        found.add(host)
+                        emit({"type": "subdomain", "host": host, "ip": ip,
+                              "source": candidate_source.get(cand, "passive")})
+                if completed % 50 == 0 or completed == total:
+                    emit({"type": "progress", "phase": "brute",
+                          "done": completed, "total": total,
+                          "found": len(resolved)})
 
-            emit({"type": "status", "message": f"Resolve complete — {len(resolved)} live subdomains total"})
+        emit({"type": "status",
+              "message": f"Resolution complete — {len(resolved)} live subdomains total"})
 
         if ctx.cancelled:
             return
 
-        # ── Phase 5: Enrich ───────────────────────────────────────────────────
+        # ── Phase 5: Enrich (streaming) ───────────────────────────────────────
         emit({"type": "phase", "phase": "enrich",
               "message": f"Enriching {len(resolved)} live subdomains..."})
         emit({"type": "status", "message": "Running HTTP probe, IP info, SSL cert, rDNS, nmap port scan, takeover check..."})
 
-        # Using optimized enrichment with shared connection pool
-        enriched = collect_enrichment(
-            resolved, threads=cfg.enrich_threads,
-            do_ports=cfg.enable_nmap, nmap_top_ports=cfg.nmap_top_ports,
-        )
-
-        # ── Phase 5.5: Shodan Enrichment (Optional) ──────────────────────────
-        if cfg.shodan_key and shodan_lib:
-            emit({"type": "status", "message": "Enriching results with Shodan data..."})
-            api = shodan_lib.Shodan(cfg.shodan_key)
-            for host, ip in resolved.items():
-                try:
-                    s_info = api.host(ip)
-                    enriched[host]["shodan"] = {
-                        "org":   s_info.get("org", ""),
-                        "os":    s_info.get("os", ""),
-                        "ports": s_info.get("ports", []),
-                    }
-                except Exception:
-                    continue
-
-        emit({"type": "status", "message": f"Enrichment complete — {len(enriched)} hosts processed"})
-
-        for host, data in enriched.items():
-            info      = data.get("info", {})
-            asn, org  = _parse_org(info)
+        def _emit_enriched(host: str, data: dict) -> None:
+            info     = data.get("info", {})
+            asn, org = _parse_org(info)
             emit({
                 "type":     "enriched",
                 "host":     host,
@@ -310,6 +264,40 @@ def run_scan(domain: str, q: queue.Queue,
                 "accessibility": data.get("accessibility", {}),
             })
 
+        # Streams via on_host_complete: each host emits as soon as it's enriched.
+        enriched = collect_enrichment(
+            resolved, threads=cfg.enrich_threads,
+            do_ports=cfg.enable_nmap, nmap_top_ports=cfg.nmap_top_ports,
+            on_host_complete=(None if (cfg.shodan_key and shodan_lib) else _emit_enriched),
+        )
+
+        # ── Phase 5.5: Shodan Enrichment (Optional) — parallelised ───────────
+        if cfg.shodan_key and shodan_lib:
+            emit({"type": "status", "message": "Enriching results with Shodan data..."})
+            api = shodan_lib.Shodan(cfg.shodan_key)
+
+            def _fetch_shodan(item):
+                host, ip = item
+                try:
+                    s_info = api.host(ip)
+                    return host, {
+                        "org":   s_info.get("org", ""),
+                        "os":    s_info.get("os", ""),
+                        "ports": s_info.get("ports", []),
+                    }
+                except Exception:
+                    return host, None
+
+            with ThreadPoolExecutor(max_workers=10) as ex:
+                for host, s_data in ex.map(_fetch_shodan, list(resolved.items())):
+                    if s_data is not None and host in enriched:
+                        enriched[host]["shodan"] = s_data
+
+            # Emit enriched events now that Shodan has been merged.
+            for host, data in enriched.items():
+                _emit_enriched(host, data)
+
+        emit({"type": "status", "message": f"Enrichment complete — {len(enriched)} hosts processed"})
         emit({"type": "done", "total": len(resolved)})
 
     except Exception as exc:
