@@ -21,16 +21,19 @@ from utils import init_dns_bucket
 from subdomain_enum import (
     fetch_crtsh,
     fetch_hackertarget,
+    fetch_alienvault,
     fetch_wayback,
     fetch_whois,
     get_nameservers,
     attempt_zone_transfer,
+    attempt_nsec_walk,
     dns_records as extract_dns_subdomains,
     resolve,
     collect_enrichment,
     collect_dns_records,
     detect_wildcard,
     generate_permutations,
+    check_takeover,
     COMMON_SUBDOMAINS,
     _parse_org,
 )
@@ -75,13 +78,14 @@ def run_scan(domain: str, q: queue.Queue,
         emit({"type": "phase", "phase": "whois",
               "message": f"Running WHOIS, DNS, and passive sources ({', '.join(passive_sources)}) in parallel..."})
 
-        with ThreadPoolExecutor(max_workers=8) as ex:
+        with ThreadPoolExecutor(max_workers=10) as ex:
             f_whois     = ex.submit(fetch_whois, domain)
             f_ns        = ex.submit(get_nameservers, domain)
             f_dns_sub   = ex.submit(extract_dns_subdomains, domain)
             f_dns_data  = ex.submit(collect_dns_records, domain)
             f_crt       = ex.submit(fetch_crtsh, domain)
             f_ht        = ex.submit(fetch_hackertarget, domain)
+            f_otx       = ex.submit(fetch_alienvault, domain)
             f_wb        = (ex.submit(fetch_wayback, domain, cfg.max_wayback,
                                       cfg.wayback_delay, 30.0, cfg.user_agent)
                            if cfg.enable_wayback else None)
@@ -113,9 +117,14 @@ def run_scan(domain: str, q: queue.Queue,
                 emit({"type": "status", "message": "No nameservers found"})
 
             f_axfr = ex.submit(attempt_zone_transfer, domain, nameservers) if nameservers else None
+            f_nsec = (ex.submit(attempt_nsec_walk, domain, nameservers)
+                      if nameservers and cfg.enable_nsec_walk else None)
             if f_axfr:
                 emit({"type": "status",
                       "message": f"Attempting zone transfer (AXFR) on {len(nameservers)} nameserver(s)..."})
+            if f_nsec:
+                emit({"type": "status",
+                      "message": f"Attempting DNSSEC NSEC zone walk..."})
 
             # DNS records (NS/MX/TXT/SRV)
             dns_sub = _safe_result(f_dns_sub, "DNS records", ctx)
@@ -148,12 +157,22 @@ def run_scan(domain: str, q: queue.Queue,
                   "message": "Collecting passive source results..."})
             crt = _safe_result(f_crt, "crt.sh", ctx)
             ht  = _safe_result(f_ht,  "HackerTarget", ctx)
+            otx = _safe_result(f_otx, "AlienVault OTX", ctx)
             wb  = _safe_result(f_wb,  "Wayback Machine", ctx) if f_wb else set()
-            found |= crt | ht | wb
+            found |= crt | ht | otx | wb
             emit({"type": "status", "message": f"crt.sh: {len(crt)} subdomains"})
             emit({"type": "status", "message": f"HackerTarget: {len(ht)} subdomains"})
+            emit({"type": "status", "message": f"AlienVault OTX: {len(otx)} subdomains"})
             if cfg.enable_wayback:
                 emit({"type": "status", "message": f"Wayback Machine: {len(wb)} subdomains"})
+
+            # NSEC zone walk
+            nsec = _safe_result(f_nsec, "NSEC walk", ctx) if f_nsec else set()
+            if nsec:
+                found |= nsec
+                emit({"type": "status", "message": f"NSEC zone walk: {len(nsec)} names enumerated"})
+            elif f_nsec:
+                emit({"type": "status", "message": "NSEC walk: zone not signed with walkable NSEC"})
 
             # Wildcard detection
             try:
@@ -173,6 +192,10 @@ def run_scan(domain: str, q: queue.Queue,
             host_sources.setdefault(host, []).append("hackertarget")
         for host in wb or []:
             host_sources.setdefault(host, []).append("wayback")
+        for host in otx or []:
+            host_sources.setdefault(host, []).append("alienvault")
+        for host in nsec or []:
+            host_sources.setdefault(host, []).append("nsec")
 
         emit({"type": "status", "message": f"Total unique so far: {len(found)}"})
 

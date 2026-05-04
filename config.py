@@ -32,6 +32,9 @@ class Config:
     enable_tech_fingerprint: bool = True
     enable_nmap: bool = True
     nmap_top_ports: int = 20
+    enable_nsec_walk: bool = True
+    enable_markov: bool = True
+    max_markov_candidates: int = 500
 
     # Shodan
     shodan_key: str = ""

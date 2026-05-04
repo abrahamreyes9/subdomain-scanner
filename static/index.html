@@ -150,6 +150,8 @@
   .badge-hackertarget { background:#0d2d1a; color:#6ee7b7; }
   .badge-wayback      { background:#2d1a3a; color:#d8b4fe; }
   .badge-dns          { background:#1c2536; color:#94a3b8; }
+  .badge-alienvault   { background:#1a2820; color:#4ade80; }
+  .badge-nsec         { background:#2d1f00; color:#fbbf24; }
   .badge-cf      { background:#F48120; color:#fff; font-weight:700; }
   .cert-critical { background: rgba(239,68,68,.15);  color: var(--red);   border: 1px solid var(--red); }
   .cert-high     { background: rgba(245,158,11,.12); color: var(--amber); border: 1px solid var(--amber); }
@@ -690,7 +692,7 @@ function toggleTheme() {
 let enrichedData = {};   // host → enriched event
 let dnsData      = {};
 let whoisData    = {};
-let sourceCounts = { crtsh: 0, hackertarget: 0, wayback: 0, axfr: 0, dns: 0, brute: 0, permutation: 0 };
+let sourceCounts = { crtsh: 0, hackertarget: 0, wayback: 0, alienvault: 0, axfr: 0, nsec: 0, dns: 0, brute: 0, permutation: 0 };
 let hostSources  = {};   // host → array of source strings
 let domain       = '';
 let es           = null;
@@ -945,8 +947,8 @@ function buildDashboard() {
 
   // Source bar helper
   const srcTotal = (sourceCounts.crtsh || 0) + (sourceCounts.hackertarget || 0) +
-                   (sourceCounts.wayback || 0) + (sourceCounts.axfr || 0) +
-                   (sourceCounts.dns || 0) + (sourceCounts.brute || 0) +
+                   (sourceCounts.wayback || 0) + (sourceCounts.alienvault || 0) + (sourceCounts.nsec || 0) +
+                   (sourceCounts.axfr || 0) + (sourceCounts.dns || 0) + (sourceCounts.brute || 0) +
                    (sourceCounts.permutation || 0) || 1;
   function srcPct(n) { return Math.round((n / srcTotal) * 100); }
   function bar(n, color, base) {
@@ -992,6 +994,16 @@ function buildDashboard() {
         <div><span class="td-stat-num">${sourceCounts.wayback || 0}</span><span class="td-stat-pct">${srcPct(sourceCounts.wayback || 0)}%</span></div>
         <div class="td-stat-label">Wayback Machine</div>
         ${bar(sourceCounts.wayback || 0, '#d8b4fe', srcTotal)}
+      </div>
+      <div>
+        <div><span class="td-stat-num">${sourceCounts.alienvault || 0}</span><span class="td-stat-pct">${srcPct(sourceCounts.alienvault || 0)}%</span></div>
+        <div class="td-stat-label">AlienVault OTX</div>
+        ${bar(sourceCounts.alienvault || 0, '#4ade80', srcTotal)}
+      </div>
+      <div>
+        <div><span class="td-stat-num">${sourceCounts.nsec || 0}</span><span class="td-stat-pct">${srcPct(sourceCounts.nsec || 0)}%</span></div>
+        <div class="td-stat-label">DNSSEC NSEC</div>
+        ${bar(sourceCounts.nsec || 0, '#fbbf24', srcTotal)}
       </div>
       <div>
         <div><span class="td-stat-num">${sourceCounts.brute || 0}</span><span class="td-stat-pct">${srcPct(sourceCounts.brute || 0)}%</span></div>
@@ -1464,10 +1476,11 @@ function renderCertExpiryChart(buckets) {
 function buildSourceBadges(srcs) {
   const badgeMap = {
     brute: 'badge-brute', permutation: 'badge-brute', axfr: 'badge-axfr',
-    crtsh: 'badge-crtsh', hackertarget: 'badge-hackertarget', wayback: 'badge-wayback', dns: 'badge-dns'
+    crtsh: 'badge-crtsh', hackertarget: 'badge-hackertarget', wayback: 'badge-wayback',
+    alienvault: 'badge-alienvault', nsec: 'badge-nsec', dns: 'badge-dns'
   };
   const lbl = {
-    crtsh: 'crt.sh', hackertarget: 'hackertarget', wayback: 'wayback',
+    crtsh: 'crt.sh', hackertarget: 'hackertarget', wayback: 'wayback', alienvault: 'otx', nsec: 'nsec',
     brute: 'brute', permutation: 'perm', axfr: 'axfr', dns: 'dns'
   };
   return srcs.map(s => {
@@ -1931,6 +1944,8 @@ function addLiveRow(host, ip, source) {
     crtsh:        ['badge-crtsh',        'crt.sh'],
     hackertarget: ['badge-hackertarget', 'hackertarget'],
     wayback:      ['badge-wayback',      'wayback'],
+    alienvault:   ['badge-alienvault',   'otx'],
+    nsec:         ['badge-nsec',         'nsec'],
     dns:          ['badge-dns',          'dns'],
   };
   const [cls, lbl] = badgeMap[source] || ['badge-passive', source];

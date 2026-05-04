@@ -32,6 +32,8 @@ import requests
 import dns.resolver
 import dns.zone
 import dns.query
+import dns.message
+import dns.rdatatype
 import dns.exception
 import urllib3
 
@@ -49,6 +51,41 @@ _CF_NETWORKS = [ipaddress.ip_network(c) for c in [
     "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
     "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
 ]]
+
+_TAKEOVER_FINGERPRINTS: dict[str, tuple[str, str]] = {
+    "github.io":            ("GitHub Pages",    "There isn't a GitHub Pages site here"),
+    "githubusercontent.com": ("GitHub Pages",   "There isn't a GitHub Pages site here"),
+    "herokuapp.com":        ("Heroku",          "No such app"),
+    "herokussl.com":        ("Heroku",          "No such app"),
+    "s3.amazonaws.com":     ("AWS S3",          "NoSuchBucket"),
+    "amazonaws.com":        ("AWS S3",          "NoSuchBucket"),
+    "azurewebsites.net":    ("Azure",           "404 Web Site not found"),
+    "cloudapp.net":         ("Azure",           "404 Web Site not found"),
+    "trafficmanager.net":   ("Azure Traffic",   "404 Web Site not found"),
+    "fastly.net":           ("Fastly",          "Fastly error: unknown domain"),
+    "zendesk.com":          ("Zendesk",         "Help Center Closed"),
+    "netlify.com":          ("Netlify",         "Not Found - Request ID"),
+    "netlify.app":          ("Netlify",         "Not Found - Request ID"),
+    "vercel.app":           ("Vercel",          "The deployment could not be found"),
+    "readthedocs.io":       ("ReadTheDocs",     "unknown to Read the Docs"),
+    "surge.sh":             ("Surge",           "project not found"),
+    "bitbucket.io":         ("Bitbucket",       "Repository not found"),
+    "ghost.io":             ("Ghost",           "The thing you were looking for is no longer here"),
+    "tumblr.com":           ("Tumblr",          "There's nothing here"),
+    "wordpress.com":        ("WordPress",       "Do you want to register"),
+    "uservoice.com":        ("UserVoice",       "This UserVoice subdomain is currently available"),
+    "freshdesk.com":        ("Freshdesk",       "Page not found"),
+    "unbounce.com":         ("Unbounce",        "The requested URL was not found"),
+    "statuspage.io":        ("Statuspage",      "page not found"),
+    "feedpress.me":         ("FeedPress",       "The feed has not been found"),
+    "readme.io":            ("ReadMe",          "Project doesnt exist"),
+    "helpscoutdocs.com":    ("HelpScout",       "No settings were found for this company"),
+    "campaignmonitor.com":  ("CampaignMonitor", "Trying to access your account?"),
+    "pingdom.com":          ("Pingdom",         "Sorry, couldn't find the status page"),
+    "cargo.site":           ("Cargo",           "If you're moving your Cargo site"),
+    "launchrock.com":       ("Launchrock",      "It looks like you may have taken a wrong turn"),
+    "strikingly.com":       ("Strikingly",      "page not found"),
+}
 
 
 def is_cloudflare_ip(ip: str) -> bool:
@@ -160,6 +197,64 @@ def attempt_zone_transfer(domain: str, nameservers: list[str],
         # Don't wait — leaked daemon worker(s) on hung sockets exit later.
         ex.shutdown(wait=False)
     return found
+
+
+def attempt_nsec_walk(domain: str, nameservers: list[str],
+                      timeout: float = 5.0, max_hops: int = 2000) -> set[str]:
+    """Walk DNSSEC NSEC chain to enumerate zone names.
+    Returns empty set if zone is not DNSSEC-signed or uses NSEC3."""
+    subs: set[str] = set()
+    if not nameservers:
+        return subs
+    try:
+        ns_ip = fast_resolve(nameservers[0])
+        if not ns_ip:
+            return subs
+    except Exception:
+        return subs
+
+    # Confirm DNSSEC (DNSKEY present at apex)
+    try:
+        q = dns.message.make_query(domain, dns.rdatatype.DNSKEY,
+                                   use_edns=True, want_dnssec=True)
+        resp = dns.query.udp(q, ns_ip, timeout=timeout)
+        if not any(rr.rdtype == dns.rdatatype.DNSKEY
+                   for section in (resp.answer, resp.authority)
+                   for rr in section):
+            return subs
+    except Exception:
+        return subs
+
+    # Walk NSEC chain
+    current = domain
+    seen: set[str] = set()
+    for _ in range(max_hops):
+        if current in seen:
+            break
+        seen.add(current)
+        try:
+            q = dns.message.make_query(current, dns.rdatatype.NSEC,
+                                       use_edns=True, want_dnssec=True)
+            resp = dns.query.udp(q, ns_ip, timeout=3.0)
+            next_name = None
+            for section in (resp.answer, resp.authority):
+                for rrset in section:
+                    if rrset.rdtype == dns.rdatatype.NSEC3:
+                        return subs  # NSEC3 — not walkable without hash cracking
+                    if rrset.rdtype == dns.rdatatype.NSEC:
+                        for rr in rrset:
+                            next_name = str(rr.next).rstrip(".")
+            if not next_name or next_name == domain:
+                break
+            if next_name.endswith(f".{domain}"):
+                subs.add(next_name.lower())
+                current = next_name
+            else:
+                break
+        except Exception:
+            break
+
+    return subs
 
 
 def dns_records(domain: str) -> set[str]:
@@ -276,6 +371,22 @@ def fetch_hackertarget(domain: str, timeout: float = 20.0) -> set[str]:
     return subs
 
 
+@retry_on_exception(backoff=[2, 5])
+def fetch_alienvault(domain: str, timeout: float = 20.0) -> set[str]:
+    """Query AlienVault OTX passive DNS for subdomains (no API key required)."""
+    url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/passive_dns"
+    r = _http_session.get(url, timeout=timeout)
+    r.raise_for_status()
+    data = r.json()
+    subs = set()
+    suffix = f".{domain}"
+    for record in data.get("passive_dns", []):
+        hostname = record.get("hostname", "").strip().lower()
+        if hostname.endswith(suffix):
+            subs.add(hostname)
+    return subs
+
+
 def fetch_wayback(domain: str, max_results: int = 50_000, delay: float = 1.0,
                    timeout: float = 30.0, user_agent: str = "SubDomainScout/2.0") -> set[str]:
     """Query the Wayback Machine CDX API for subdomains.
@@ -387,6 +498,37 @@ def _is_valid_dns_label(label: str) -> bool:
     )
 
 
+def _build_markov(labels: list[str], order: int = 2) -> dict[str, dict[str, int]]:
+    """Build character n-gram frequency table from label strings."""
+    model: dict[str, dict[str, int]] = {}
+    for label in labels:
+        s = "\x00" * order + label + "\x01"
+        for i in range(len(s) - order):
+            ctx = s[i:i + order]
+            nxt = s[i + order]
+            model.setdefault(ctx, {}).setdefault(nxt, 0)
+            model[ctx][nxt] += 1
+    return model
+
+
+def _markov_sample(model: dict, order: int, rng, max_len: int = 24) -> str | None:
+    """Sample one label from the Markov model."""
+    ctx = "\x00" * order
+    out: list[str] = []
+    for _ in range(max_len):
+        nexts = model.get(ctx)
+        if not nexts:
+            break
+        chars = list(nexts.keys())
+        weights = [nexts[c] for c in chars]
+        char = rng.choices(chars, weights=weights)[0]
+        if char == "\x01":
+            break
+        out.append(char)
+        ctx = (ctx + char)[1:]
+    return "".join(out) if len(out) >= 3 else None
+
+
 def generate_permutations(found: set[str], domain: str,
                           max_perms: int = 10_000,
                           high_suffixes: list[str] | None = None,
@@ -442,6 +584,23 @@ def generate_permutations(found: set[str], domain: str,
                 candidates.append(fqdn)
                 seen.add(fqdn)
                 count += 1
+
+    # Markov-chain candidates (requires enough training data)
+    if len(prefixes) >= 5 and count < max_perms:
+        import random
+        rng = random.Random(42)
+        markov_model = _build_markov(list(prefixes), order=2)
+        budget = min(max_perms - count, 500)
+        attempts = 0
+        while count < max_perms and attempts < budget * 4:
+            label = _markov_sample(markov_model, order=2, rng=rng)
+            attempts += 1
+            if label and _is_valid_dns_label(label):
+                fqdn = f"{label}.{domain}"
+                if fqdn not in seen:
+                    candidates.append(fqdn)
+                    seen.add(fqdn)
+                    count += 1
 
     return candidates
 
@@ -985,6 +1144,50 @@ def get_ssl_cert_info(host: str, timeout: float = 3.0) -> dict:
         return {}
 
 
+def check_takeover(host: str, timeout: float = 5.0) -> dict | None:
+    """Check if host is vulnerable to subdomain takeover via dangling CNAME."""
+    try:
+        answers = dns.resolver.resolve(host, "CNAME")
+        cname = str(answers[0].target).rstrip(".")
+    except Exception:
+        return None  # no CNAME, not a takeover candidate
+
+    matched_service = None
+    matched_fp = None
+    for pattern, (service, fingerprint) in _TAKEOVER_FINGERPRINTS.items():
+        if cname.endswith(pattern):
+            matched_service = service
+            matched_fp = fingerprint
+            break
+
+    if not matched_service:
+        return None  # CNAME doesn't point to a known takeover-prone service
+
+    # Probe HTTP — check if the fingerprint appears in the response body
+    for scheme in ("https", "http"):
+        try:
+            r = _http_session.get(
+                f"{scheme}://{host}", timeout=timeout,
+                allow_redirects=True, verify=False,
+            )
+            if matched_fp.lower() in r.text.lower():
+                return {
+                    "cname":       cname,
+                    "service":     matched_service,
+                    "status":      "vulnerable",
+                    "fingerprint": matched_fp,
+                }
+        except Exception:
+            continue
+
+    return {
+        "cname":       cname,
+        "service":     matched_service,
+        "status":      "check_failed",
+        "fingerprint": matched_fp,
+    }
+
+
 # ── Internet accessibility verification ────────────────────────────────────────
 
 _VERIFY_PORTS = (80, 443, 8080, 8443, 22)
@@ -1150,6 +1353,7 @@ def collect_enrichment(
             if do_shodan:
                 submit(host, "shodan", get_shodan_internetdb, ip, shodan_timeout)
             submit(host, "ping", _ping_host, host)
+            submit(host, "takeover", check_takeover, host)
             for port in _EXTRA_TCP_PORTS:
                 submit(host, f"tcp_{port}", _tcp_check_one, ip, port, http_timeout)
 
@@ -1249,6 +1453,7 @@ def collect_enrichment(
                 "ports":         ports,
                 "cloudflare":    is_cloudflare_ip(ip),
                 "accessibility": accessibility,
+                "takeover":      _r("takeover", None),
             }
             enriched[host] = data
             if on_host_complete:
