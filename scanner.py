@@ -137,6 +137,20 @@ def run_scan(domain: str, q: queue.Queue,
             wb  = _safe_result(f_wb,  "Wayback Machine", ctx) if f_wb else set()
 
         found |= crt | ht | wb
+
+        # Build per-source tracking: host → list of sources that found it
+        host_sources: dict[str, list[str]] = {}
+        for host in axfr:
+            host_sources.setdefault(host, []).append("axfr")
+        for host in dns_sub:
+            host_sources.setdefault(host, []).append("dns")
+        for host in crt:
+            host_sources.setdefault(host, []).append("crtsh")
+        for host in ht:
+            host_sources.setdefault(host, []).append("hackertarget")
+        for host in wb:
+            host_sources.setdefault(host, []).append("wayback")
+
         emit({"type": "status", "message": f"crt.sh: {len(crt)} subdomains"})
         emit({"type": "status", "message": f"HackerTarget: {len(ht)} subdomains"})
         if cfg.enable_wayback:
@@ -175,6 +189,7 @@ def run_scan(domain: str, q: queue.Queue,
                         continue
                     found.add(host)
                     resolved[host] = ip
+                    host_sources.setdefault(host, []).append("brute")
                     emit({"type": "subdomain", "host": host, "ip": ip, "source": "brute"})
                 if completed_brute % 50 == 0 or completed_brute == total_brute:
                     emit({"type": "progress", "phase": "brute",
@@ -214,6 +229,7 @@ def run_scan(domain: str, q: queue.Queue,
                                 continue
                             found.add(host)
                             resolved[host] = ip
+                            host_sources.setdefault(host, []).append("permutation")
                             emit({"type": "subdomain", "host": host, "ip": ip,
                                   "source": "permutation"})
                         if completed_perm % 50 == 0 or completed_perm == total_perm:
@@ -251,7 +267,9 @@ def run_scan(domain: str, q: queue.Queue,
                         if wildcard_ips and ip in wildcard_ips:
                             continue
                         resolved[host] = ip
-                        emit({"type": "subdomain", "host": host, "ip": ip, "source": "passive"})
+                        srcs = host_sources.get(host, ["passive"])
+                        emit({"type": "subdomain", "host": host, "ip": ip,
+                              "source": srcs[0], "sources": srcs})
                     if completed_resolve % 50 == 0 or completed_resolve == total_resolve:
                         emit({"type": "progress", "phase": "resolve",
                               "done": completed_resolve, "total": total_resolve,

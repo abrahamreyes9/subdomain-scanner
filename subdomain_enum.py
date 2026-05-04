@@ -265,7 +265,6 @@ def fetch_wayback(domain: str, max_results: int = 50_000, delay: float = 1.0,
         "fl": "original",
         "collapse": "urlkey",
         "limit": str(max_results),
-        "filter": "statuscode:200",
     })
     url = f"https://web.archive.org/cdx/search/cdx?{params}"
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})

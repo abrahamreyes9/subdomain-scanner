@@ -146,6 +146,10 @@
   .badge-brute   { background:#1e1b4b; color:#a5b4fc; }
   .badge-passive { background:#0c2a1a; color:#6ee7b7; }
   .badge-axfr    { background:#451a03; color:#fbbf24; }
+  .badge-crtsh        { background:#1e3a5f; color:#7dd3fc; }
+  .badge-hackertarget { background:#0d2d1a; color:#6ee7b7; }
+  .badge-wayback      { background:#2d1a3a; color:#d8b4fe; }
+  .badge-dns          { background:#1c2536; color:#94a3b8; }
   .badge-cf      { background:#F48120; color:#fff; font-weight:700; }
   .cert-critical { background: rgba(239,68,68,.15);  color: var(--red);   border: 1px solid var(--red); }
   .cert-high     { background: rgba(245,158,11,.12); color: var(--amber); border: 1px solid var(--amber); }
@@ -580,19 +584,20 @@
       <div class="table-wrap">
         <table id="confirmed-table" class="resizable-table">
           <colgroup>
-            <col style="width:20%">
             <col style="width:18%">
-            <col style="width:9%">
-            <col style="width:14%">
+            <col style="width:16%">
+            <col style="width:8%">
+            <col style="width:12%">
             <col style="width:5%">
             <col style="width:9%">
-            <col style="width:13%">
-            <col style="width:12%">
+            <col style="width:11%">
+            <col style="width:10%">
+            <col style="width:11%">
           </colgroup>
           <thead><tr>
             <th>Host</th><th>IP</th>
             <th>ASN</th><th>Organisation</th><th>Country</th>
-            <th>Open Ports</th><th>Services</th><th>Verified By</th>
+            <th>Open Ports</th><th>Services</th><th>Source</th><th>Verified By</th>
           </tr></thead>
           <tbody id="confirmed-tbody"></tbody>
         </table>
@@ -605,18 +610,19 @@
       <div class="table-wrap">
         <table id="detected-table" class="resizable-table">
           <colgroup>
-            <col style="width:22%">
             <col style="width:20%">
-            <col style="width:10%">
-            <col style="width:16%">
-            <col style="width:6%">
-            <col style="width:10%">
-            <col style="width:16%">
+            <col style="width:18%">
+            <col style="width:9%">
+            <col style="width:14%">
+            <col style="width:5%">
+            <col style="width:9%">
+            <col style="width:13%">
+            <col style="width:12%">
           </colgroup>
           <thead><tr>
             <th>Host</th><th>IP</th>
             <th>ASN</th><th>Organisation</th><th>Country</th>
-            <th>Open Ports</th><th>Services</th>
+            <th>Open Ports</th><th>Services</th><th>Source</th>
           </tr></thead>
           <tbody id="detected-tbody"></tbody>
         </table>
@@ -684,7 +690,8 @@ function toggleTheme() {
 let enrichedData = {};   // host → enriched event
 let dnsData      = {};
 let whoisData    = {};
-let sourceCounts = { passive: 0, brute: 0, permutation: 0, axfr: 0 };
+let sourceCounts = { crtsh: 0, hackertarget: 0, wayback: 0, axfr: 0, dns: 0, brute: 0, permutation: 0 };
+let hostSources  = {};   // host → array of source strings
 let domain       = '';
 let es           = null;
 
@@ -743,9 +750,11 @@ function handleEvent(e) {
   }
 
   else if (ev.type === 'subdomain') {
-    addLiveRow(ev.host, ev.ip, ev.source);
+    hostSources[ev.host] = ev.sources || [ev.source];
+    const primary = ev.source;
+    sourceCounts[primary] = (sourceCounts[primary] || 0) + 1;
+    addLiveRow(ev.host, ev.ip, primary);
     inc('stat-found');
-    sourceCounts[ev.source] = (sourceCounts[ev.source] || 0) + 1;
   }
 
   else if (ev.type === 'enriched') {
@@ -935,8 +944,10 @@ function buildDashboard() {
   const certTotal = cert30 + cert90 + cert180 + certLong || 1;
 
   // Source bar helper
-  const srcTotal = (sourceCounts.passive || 0) + (sourceCounts.brute || 0) +
-                   (sourceCounts.permutation || 0) + (sourceCounts.axfr || 0) || 1;
+  const srcTotal = (sourceCounts.crtsh || 0) + (sourceCounts.hackertarget || 0) +
+                   (sourceCounts.wayback || 0) + (sourceCounts.axfr || 0) +
+                   (sourceCounts.dns || 0) + (sourceCounts.brute || 0) +
+                   (sourceCounts.permutation || 0) || 1;
   function srcPct(n) { return Math.round((n / srcTotal) * 100); }
   function bar(n, color, base) {
     const w = Math.round((n / base) * 100);
@@ -968,19 +979,39 @@ function buildDashboard() {
     <div class="td-label td-label-indigo">${IC.search} Discovery Vectors</div>
     <div class="td-stats-list">
       <div>
-        <div><span class="td-stat-num">${sourceCounts.passive || 0}</span><span class="td-stat-pct">${srcPct(sourceCounts.passive || 0)}%</span></div>
-        <div class="td-stat-label">Passive Sources</div>
-        ${bar(sourceCounts.passive || 0, '#818cf8', srcTotal)}
+        <div><span class="td-stat-num">${sourceCounts.crtsh || 0}</span><span class="td-stat-pct">${srcPct(sourceCounts.crtsh || 0)}%</span></div>
+        <div class="td-stat-label">crt.sh</div>
+        ${bar(sourceCounts.crtsh || 0, '#7dd3fc', srcTotal)}
+      </div>
+      <div>
+        <div><span class="td-stat-num">${sourceCounts.hackertarget || 0}</span><span class="td-stat-pct">${srcPct(sourceCounts.hackertarget || 0)}%</span></div>
+        <div class="td-stat-label">HackerTarget</div>
+        ${bar(sourceCounts.hackertarget || 0, '#6ee7b7', srcTotal)}
+      </div>
+      <div>
+        <div><span class="td-stat-num">${sourceCounts.wayback || 0}</span><span class="td-stat-pct">${srcPct(sourceCounts.wayback || 0)}%</span></div>
+        <div class="td-stat-label">Wayback Machine</div>
+        ${bar(sourceCounts.wayback || 0, '#d8b4fe', srcTotal)}
       </div>
       <div>
         <div><span class="td-stat-num">${sourceCounts.brute || 0}</span><span class="td-stat-pct">${srcPct(sourceCounts.brute || 0)}%</span></div>
         <div class="td-stat-label">Brute Force</div>
-        ${bar(sourceCounts.brute || 0, '#818cf8', srcTotal)}
+        ${bar(sourceCounts.brute || 0, '#a5b4fc', srcTotal)}
       </div>
       <div>
         <div><span class="td-stat-num">${sourceCounts.permutation || 0}</span><span class="td-stat-pct">${srcPct(sourceCounts.permutation || 0)}%</span></div>
         <div class="td-stat-label">Permutations</div>
-        ${bar(sourceCounts.permutation || 0, '#818cf8', srcTotal)}
+        ${bar(sourceCounts.permutation || 0, '#a5b4fc', srcTotal)}
+      </div>
+      <div>
+        <div><span class="td-stat-num">${sourceCounts.axfr || 0}</span><span class="td-stat-pct">${srcPct(sourceCounts.axfr || 0)}%</span></div>
+        <div class="td-stat-label">AXFR</div>
+        ${bar(sourceCounts.axfr || 0, '#fbbf24', srcTotal)}
+      </div>
+      <div>
+        <div><span class="td-stat-num">${sourceCounts.dns || 0}</span><span class="td-stat-pct">${srcPct(sourceCounts.dns || 0)}%</span></div>
+        <div class="td-stat-label">DNS Records</div>
+        ${bar(sourceCounts.dns || 0, '#94a3b8', srcTotal)}
       </div>
     </div>`;
 
@@ -1429,6 +1460,23 @@ function renderCertExpiryChart(buckets) {
   }
 }
 
+// ── Build source badges ───────────────────────────────────────────────────────
+function buildSourceBadges(srcs) {
+  const badgeMap = {
+    brute: 'badge-brute', permutation: 'badge-brute', axfr: 'badge-axfr',
+    crtsh: 'badge-crtsh', hackertarget: 'badge-hackertarget', wayback: 'badge-wayback', dns: 'badge-dns'
+  };
+  const lbl = {
+    crtsh: 'crt.sh', hackertarget: 'hackertarget', wayback: 'wayback',
+    brute: 'brute', permutation: 'perm', axfr: 'axfr', dns: 'dns'
+  };
+  return srcs.map(s => {
+    const cls = badgeMap[s] || 'badge-passive';
+    const text = lbl[s] || s;
+    return `<span class="badge ${cls}">${text}</span>`;
+  }).join(' ');
+}
+
 // ── Build final report ─────────────────────────────────────────────────────────
 function buildReport() {
   // Summary panels
@@ -1483,6 +1531,7 @@ function buildReport() {
 
     if (isConfirmed) {
       confirmedCount++;
+      const srcs = hostSources[host] || ['passive'];
       tr.innerHTML = `
         <td data-label="Host" class="nowrap"><a href="https://${h(host)}" target="_blank">${h(host)}</a>${d.takeover ? ' <span style="color:var(--red);font-size:11px">takeover</span>' : ''}</td>
         <td data-label="IP" class="mono nowrap">${h(d.ip)}${rdns}</td>
@@ -1491,10 +1540,12 @@ function buildReport() {
         <td data-label="Country">${h(d.country)}</td>
         <td data-label="Open Ports">${ports}</td>
         <td data-label="Services">${services}</td>
+        <td data-label="Source">${buildSourceBadges(srcs)}</td>
         <td data-label="Verified By">${buildVerifyBadges(acc.methods || [])}</td>`;
       confirmedTbody.appendChild(tr);
     } else {
       detectedCount++;
+      const srcs = hostSources[host] || ['passive'];
       tr.innerHTML = `
         <td data-label="Host" class="nowrap"><a href="https://${h(host)}" target="_blank">${h(host)}</a></td>
         <td data-label="IP" class="mono nowrap">${h(d.ip)}${rdns}</td>
@@ -1502,7 +1553,8 @@ function buildReport() {
         <td data-label="Organisation">${h(d.org)}</td>
         <td data-label="Country">${h(d.country)}</td>
         <td data-label="Open Ports">${ports}</td>
-        <td data-label="Services">${services}</td>`;
+        <td data-label="Services">${services}</td>
+        <td data-label="Source">${buildSourceBadges(srcs)}</td>`;
       detectedTbody.appendChild(tr);
     }
   }
@@ -1872,10 +1924,17 @@ function h(str) {
 }
 
 function addLiveRow(host, ip, source) {
-  const badge = source === 'brute'       ? '<span class="badge badge-brute">brute</span>'
-              : source === 'axfr'        ? '<span class="badge badge-axfr">axfr</span>'
-              : source === 'permutation' ? '<span class="badge badge-brute">perm</span>'
-              : '<span class="badge badge-passive">passive</span>';
+  const badgeMap = {
+    brute:        ['badge-brute',        'brute'],
+    permutation:  ['badge-brute',        'perm'],
+    axfr:         ['badge-axfr',         'axfr'],
+    crtsh:        ['badge-crtsh',        'crt.sh'],
+    hackertarget: ['badge-hackertarget', 'hackertarget'],
+    wayback:      ['badge-wayback',      'wayback'],
+    dns:          ['badge-dns',          'dns'],
+  };
+  const [cls, lbl] = badgeMap[source] || ['badge-passive', source];
+  const badge = `<span class="badge ${cls}">${lbl}</span>`;
   const tr = document.createElement('tr');
   tr.innerHTML = `<td class="mono">${h(host)}</td><td class="mono">${h(ip)}</td><td>${badge}</td>`;
   document.getElementById('live-tbody').prepend(tr);
@@ -1982,8 +2041,8 @@ function initResizableColumns(table) {
 }
 
 function reset() {
-  enrichedData = {}; dnsData = {}; whoisData = {};
-  sourceCounts = { passive: 0, brute: 0, permutation: 0, axfr: 0 };
+  enrichedData = {}; dnsData = {}; whoisData = {}; hostSources = {};
+  sourceCounts = { crtsh: 0, hackertarget: 0, wayback: 0, axfr: 0, dns: 0, brute: 0, permutation: 0 };
   document.getElementById('live-tbody').innerHTML      = '';
   document.getElementById('activity-log').innerHTML    = '';
   document.getElementById('confirmed-tbody').innerHTML = '';
