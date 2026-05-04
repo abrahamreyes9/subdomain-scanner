@@ -242,16 +242,22 @@ def dns_records(domain: str) -> set[str]:
 @retry_on_exception(backoff=[2, 5, 10])
 def fetch_crtsh(domain: str, timeout: float = 30.0) -> set[str]:
     """Query crt.sh certificate transparency logs."""
-    url = f"https://crt.sh/?q=%.{domain}&output=json&deduplicate=Y"
+    url = f"https://crt.sh/?q=%.{domain}&output=json&deduplicate=Y&exclude=expired"
     r = _http_session.get(url, timeout=timeout)
     r.raise_for_status()
     entries = r.json()
     subs = set()
+    suffix = f".{domain}"
     for e in entries:
+        # name_value contains all SANs (newline-separated, may have wildcard prefix)
         for name in e.get("name_value", "").splitlines():
             name = name.strip().lstrip("*.")
-            if name.endswith(f".{domain}"):
+            if name.endswith(suffix):
                 subs.add(name.lower())
+        # common_name may hold the domain when no SAN extension is present
+        cn = e.get("common_name", "").strip().lstrip("*.")
+        if cn.endswith(suffix):
+            subs.add(cn.lower())
     return subs
 
 
