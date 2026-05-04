@@ -18,7 +18,9 @@ class TokenBucket:
             rate:  minimum seconds between tokens (1/rate = max requests/sec).
             burst: max tokens that can accumulate (allows short bursts).
         """
-        self.rate = max(rate, 0.001)  # avoid division by zero
+        if rate <= 0:
+            raise ValueError("TokenBucket rate must be positive; init_dns_bucket handles the disabled case.")
+        self.rate = rate
         self.capacity = burst
         self.tokens = float(burst)
         self._lock = threading.Lock()
@@ -44,9 +46,12 @@ _dns_bucket: TokenBucket | None = None
 
 
 def init_dns_bucket(rate: float = 0.05, burst: int = 20) -> None:
-    """Create (or replace) the global DNS token bucket."""
+    """Create (or replace) the global DNS token bucket. rate <= 0 disables it."""
     global _dns_bucket
-    _dns_bucket = TokenBucket(rate=rate, burst=burst)
+    if rate <= 0:
+        _dns_bucket = None
+    else:
+        _dns_bucket = TokenBucket(rate=rate, burst=burst)
 
 
 def acquire_dns_token() -> None:
