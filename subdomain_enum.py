@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from functools import lru_cache
 
-from utils import acquire_dns_token
+from utils import acquire_dns_token, retry_on_exception
 
 import requests
 import dns.resolver
@@ -239,41 +239,35 @@ def dns_records(domain: str) -> set[str]:
 
 # ── passive sources ────────────────────────────────────────────────────────────
 
-def fetch_crtsh(domain: str, timeout: float = 12.0) -> set[str]:
+@retry_on_exception(backoff=[2, 5, 10])
+def fetch_crtsh(domain: str, timeout: float = 30.0) -> set[str]:
     """Query crt.sh certificate transparency logs."""
-    url = f"https://crt.sh/?q=%.{domain}&output=json"
-    try:
-        r = _http_session.get(url, timeout=timeout)
-        r.raise_for_status()
-        entries = r.json()
-        subs = set()
-        for e in entries:
-            for name in e.get("name_value", "").splitlines():
-                name = name.strip().lstrip("*.")
-                if name.endswith(f".{domain}"):
-                    subs.add(name.lower())
-        return subs
-    except Exception as ex:
-        print(f"[!] crt.sh error: {ex}")
-        return set()
+    url = f"https://crt.sh/?q=%.{domain}&output=json&deduplicate=Y"
+    r = _http_session.get(url, timeout=timeout)
+    r.raise_for_status()
+    entries = r.json()
+    subs = set()
+    for e in entries:
+        for name in e.get("name_value", "").splitlines():
+            name = name.strip().lstrip("*.")
+            if name.endswith(f".{domain}"):
+                subs.add(name.lower())
+    return subs
 
 
-def fetch_hackertarget(domain: str, timeout: float = 12.0) -> set[str]:
+@retry_on_exception(backoff=[2, 5])
+def fetch_hackertarget(domain: str, timeout: float = 20.0) -> set[str]:
     """Query HackerTarget's free subdomain API."""
     url = f"https://api.hackertarget.com/hostsearch/?q={domain}"
-    try:
-        r = _http_session.get(url, timeout=timeout)
-        r.raise_for_status()
-        subs = set()
-        for line in r.text.splitlines():
-            if "," in line:
-                host = line.split(",")[0].strip().lower()
-                if host.endswith(f".{domain}"):
-                    subs.add(host)
-        return subs
-    except Exception as ex:
-        print(f"[!] HackerTarget error: {ex}")
-        return set()
+    r = _http_session.get(url, timeout=timeout)
+    r.raise_for_status()
+    subs = set()
+    for line in r.text.splitlines():
+        if "," in line:
+            host = line.split(",")[0].strip().lower()
+            if host.endswith(f".{domain}"):
+                subs.add(host)
+    return subs
 
 
 def fetch_wayback(domain: str, max_results: int = 50_000, delay: float = 1.0,
