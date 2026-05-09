@@ -529,7 +529,7 @@
     <!-- Takeover risks sit inside the card, below the buttons -->
     <div id="takeover-section" style="display:none">
       <div class="takeover-inner">
-        <div class="takeover-header">⚠ Potential Subdomain Takeover Risks</div>
+        <div class="takeover-header" title="A subdomain takeover occurs when a DNS CNAME record points to a third-party service (e.g. GitHub Pages, Heroku, AWS S3) whose backing resource has been deleted or never claimed. An attacker can register that resource and serve arbitrary content from your subdomain. Each entry below was confirmed: the service's own 'unclaimed' error page was found in the HTTP response.">⚠ Confirmed Subdomain Takeover Risks</div>
         <div id="takeover-list"></div>
       </div>
     </div>
@@ -965,7 +965,7 @@ function buildDashboard() {
     <div class="td-label td-label-rose">${IC.alert} Immediate Attention</div>
     <div>
       <div class="td-big">${takeoverCount}</div>
-      <div class="td-big-sub">Takeover Risks</div>
+      <div class="td-big-sub" title="Subdomains with a CNAME pointing to an unclaimed third-party resource — confirmed by finding the service's own error fingerprint in the HTTP response. An attacker could register the backing service and host content on your domain.">Takeover Risks</div>
     </div>
     <hr class="td-divider">
     <div>
@@ -1546,7 +1546,7 @@ function buildReport() {
       confirmedCount++;
       const srcs = hostSources[host] || ['passive'];
       tr.innerHTML = `
-        <td data-label="Host" class="nowrap"><a href="https://${h(host)}" target="_blank">${h(host)}</a>${d.takeover ? ' <span style="color:var(--red);font-size:11px">takeover</span>' : ''}</td>
+        <td data-label="Host" class="nowrap"><a href="https://${h(host)}" target="_blank">${h(host)}</a>${d.takeover ? ' <span style="color:var(--red);font-size:11px;cursor:help" title="Confirmed takeover risk: CNAME → ' + h(d.takeover?.cname || '') + ' (' + h(d.takeover?.service || '') + '). The service returned its own unclaimed-resource error page, meaning an attacker could register this resource and serve content from your domain.">⚠ takeover</span>' : ''}</td>
         <td data-label="IP" class="mono nowrap">${h(d.ip)}${rdns}</td>
         <td data-label="ASN" class="nowrap">${d.asn ? `<span class="asn-badge">${h(d.asn)}</span>` : ''}${cidr}</td>
         <td data-label="Organisation">${h(d.org)}</td>

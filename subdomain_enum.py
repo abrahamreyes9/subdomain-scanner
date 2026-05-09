@@ -1163,7 +1163,10 @@ def check_takeover(host: str, timeout: float = 5.0) -> dict | None:
     if not matched_service:
         return None  # CNAME doesn't point to a known takeover-prone service
 
-    # Probe HTTP — check if the fingerprint appears in the response body
+    # Probe HTTP — check if the fingerprint appears in the response body.
+    # A successful response WITHOUT the fingerprint means the service is
+    # properly configured for this domain — return None immediately.
+    # Only return a result when the fingerprint is confirmed present.
     for scheme in ("https", "http"):
         try:
             r = _http_session.get(
@@ -1177,15 +1180,11 @@ def check_takeover(host: str, timeout: float = 5.0) -> dict | None:
                     "status":      "vulnerable",
                     "fingerprint": matched_fp,
                 }
+            return None  # service responded — domain is claimed, not vulnerable
         except Exception:
             continue
 
-    return {
-        "cname":       cname,
-        "service":     matched_service,
-        "status":      "check_failed",
-        "fingerprint": matched_fp,
-    }
+    return None  # could not reach service — cannot confirm takeover
 
 
 # ── Internet accessibility verification ────────────────────────────────────────
